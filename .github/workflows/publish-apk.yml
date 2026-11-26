@@ -13,13 +13,13 @@ on:
       app_name:
         description: 'Android application display name'
         required: false
-        default: 'NetPulse TV'
+        default: 'TellyBeam TV'
       app_id:
         description: 'Android package ID'
         required: false
-        default: 'app.netpulse.tv'
+        default: 'app.tellybeam.tv'
       server_url:
-        description: 'Optional NetPulse backend base URL for APK API calls'
+        description: 'Optional TellyBeam backend base URL for APK API calls'
         required: false
         default: ''
 
@@ -58,16 +58,16 @@ jobs:
 
       - name: Package Android & TV project with Capacitor
         env:
-          APP_NAME: ${{ github.event.inputs.app_name || 'NetPulse TV' }}
-          APP_ID: ${{ github.event.inputs.app_id || 'app.netpulse.tv' }}
+          APP_NAME: ${{ github.event.inputs.app_name || 'TellyBeam TV' }}
+          APP_ID: ${{ github.event.inputs.app_id || 'app.tellybeam.tv' }}
         run: |
           rm -rf android capacitor.config.json capacitor.config.ts
           npm install --no-save --legacy-peer-deps @capacitor/core@^8 @capacitor/cli@^8 @capacitor/android@^8
           node -e '
             const fs = require("fs");
             fs.writeFileSync("capacitor.config.json", JSON.stringify({
-              appId: process.env.APP_ID || "app.netpulse.tv",
-              appName: process.env.APP_NAME || "NetPulse TV",
+              appId: process.env.APP_ID || "app.tellybeam.tv",
+              appName: process.env.APP_NAME || "TellyBeam TV",
               webDir: "dist",
               android: { allowMixedContent: true }
             }, null, 2));
@@ -96,23 +96,126 @@ jobs:
           '
           npx cap sync android
 
-      - name: Build Android APK
+      - name: Configure upgradeable signing & version
+        env:
+          SIGNING_CONFIG: ${{ secrets.TELLYBEAM_SIGNING_CONFIG }}
+          TAG_NAME: ${{ github.event.inputs.release_tag || github.ref_name || 'v1.0.0' }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const { execFileSync } = require("child_process");
+
+            const ksPath = "android/app/tellybeam-release.p12";
+            let storePassword = "";
+            let keyAlias = "tellybeam";
+            let keyPassword = "";
+
+            const rawSecret = (process.env.SIGNING_CONFIG || "").trim();
+            if (rawSecret) {
+              const cfg = JSON.parse(rawSecret);
+              if (!cfg.keystoreB64 || !cfg.storePassword || !cfg.keyAlias) {
+                throw new Error("TELLYBEAM_SIGNING_CONFIG secret is missing required fields.");
+              }
+              fs.writeFileSync(ksPath, Buffer.from(cfg.keystoreB64, "base64"));
+              storePassword = String(cfg.storePassword);
+              keyAlias = String(cfg.keyAlias);
+              keyPassword = String(cfg.keyPassword || cfg.storePassword);
+              console.log("::add-mask::" + storePassword);
+              console.log("::add-mask::" + keyPassword);
+              execFileSync("keytool", [
+                "-list",
+                "-keystore", ksPath,
+                "-storetype", "PKCS12",
+                "-storepass", storePassword,
+                "-alias", keyAlias
+              ], { stdio: "inherit" });
+              console.log("Loaded persistent release signing keystore.");
+            } else {
+              console.warn("::warning::TELLYBEAM_SIGNING_CONFIG secret not found; generating a one-time release keystore. Future builds will require re-install unless TELLYBEAM_SIGNING_CONFIG is set.");
+              storePassword = "tellybeam_fallback_key";
+              keyPassword = storePassword;
+              execFileSync("keytool", [
+                "-genkeypair", "-v",
+                "-keystore", ksPath,
+                "-storetype", "PKCS12",
+                "-alias", keyAlias,
+                "-keyalg", "RSA",
+                "-keysize", "2048",
+                "-validity", "10000",
+                "-storepass", storePassword,
+                "-keypass", keyPassword,
+                "-dname", "CN=TellyBeam TV, O=TellyBeam, C=US"
+              ], { stdio: "inherit" });
+            }
+
+            fs.appendFileSync(
+              process.env.GITHUB_ENV,
+              [
+                "ANDROID_STORE_PASSWORD=" + storePassword,
+                "ANDROID_KEY_ALIAS=" + keyAlias,
+                "ANDROID_KEY_PASSWORD=" + keyPassword
+              ].join("\n") + "\n"
+            );
+
+            const runNum = Math.max(1, parseInt(process.env.RUN_NUMBER || "1", 10) || 1);
+            const versionCode = 100 + runNum;
+            const cleanTag = (process.env.TAG_NAME || "v1.0.0").replace(/^v/i, "") || "1.0.0";
+            const versionName = cleanTag + "+" + runNum;
+
+            const gradlePath = "android/app/build.gradle";
+            let gradle = fs.readFileSync(gradlePath, "utf8");
+            gradle = gradle.replace(/versionCode\s+\d+/, "versionCode " + versionCode);
+            gradle = gradle.replace(/versionName\s+["\x27][^"\x27]*["\x27]/, "versionName " + JSON.stringify(versionName));
+            gradle += "\nandroid {\n" +
+              "    defaultConfig {\n" +
+              "        versionCode " + versionCode + "\n" +
+              "        versionName " + JSON.stringify(versionName) + "\n" +
+              "    }\n" +
+              "    signingConfigs {\n" +
+              "        tellybeamRelease {\n" +
+              "            storeFile file(\"tellybeam-release.p12\")\n" +
+              "            storePassword System.getenv(\"ANDROID_STORE_PASSWORD\")\n" +
+              "            keyAlias System.getenv(\"ANDROID_KEY_ALIAS\")\n" +
+              "            keyPassword System.getenv(\"ANDROID_KEY_PASSWORD\")\n" +
+              "            storeType \"PKCS12\"\n" +
+              "        }\n" +
+              "    }\n" +
+              "    buildTypes {\n" +
+              "        release {\n" +
+              "            signingConfig signingConfigs.tellybeamRelease\n" +
+              "        }\n" +
+              "    }\n" +
+              "}\n";
+            fs.writeFileSync(gradlePath, gradle);
+            console.log("Configured upgradeable release APK versionCode=" + versionCode + " versionName=" + versionName);
+          '
+
+      - name: Build signed Android Release APK
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
+          ./gradlew assembleRelease --no-daemon
 
-      - name: Prepare APK artifact
+      - name: Verify APK signature & prepare artifact
         env:
           TAG_NAME: ${{ github.event.inputs.release_tag || github.ref_name || 'v1.0.0' }}
         run: |
+          APK_PATH="android/app/build/outputs/apk/release/app-release.apk"
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          APKSIGNER="${SDK_ROOT}/build-tools/36.0.0/apksigner"
+          if [ -x "$APKSIGNER" ]; then
+            "$APKSIGNER" verify --print-certs "$APK_PATH"
+          elif command -v apksigner >/dev/null 2>&1; then
+            apksigner verify --print-certs "$APK_PATH"
+          fi
           mkdir -p release-assets
-          cp android/app/build/outputs/apk/debug/app-debug.apk "release-assets/netpulse-tv-${TAG_NAME}.apk"
+          cp "$APK_PATH" "release-assets/tellybeam-tv-${TAG_NAME}.apk"
 
       - name: Upload APK build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: netpulse-tv-apk
+          name: tellybeam-tv-apk
           path: release-assets/*.apk
           retention-days: 30
 
@@ -121,7 +224,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.release_tag || github.ref_name || 'v1.0.0' }}
-          name: "NetPulse TV ${{ github.event.inputs.release_tag || github.ref_name || 'v1.0.0' }}"
+          name: "TellyBeam TV ${{ github.event.inputs.release_tag || github.ref_name || 'v1.0.0' }}"
           body: "Automated Android & TV APK build from GitHub Actions."
           files: release-assets/*.apk
         env:

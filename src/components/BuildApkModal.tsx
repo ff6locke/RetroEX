@@ -20,7 +20,7 @@ interface BuildApkModalProps {
   onClose: () => void;
 }
 
-const LAST_REPO_STORAGE_KEY = 'netpulse_last_github_repo_v1';
+const LAST_REPO_STORAGE_KEY = 'tellybeam_last_github_repo_v1';
 
 async function readJsonSafe<T = Record<string, unknown>>(
   res: Response,
@@ -65,8 +65,8 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
   const [ghBranch, setGhBranch] = useState('main');
 
   const [compileTag, setCompileTag] = useState('v1.0.0');
-  const [compileAppName, setCompileAppName] = useState('NetPulse TV');
-  const [compileAppId, setCompileAppId] = useState('app.netpulse.tv');
+  const [compileAppName, setCompileAppName] = useState('TellyBeam TV');
+  const [compileAppId, setCompileAppId] = useState('app.tellybeam.tv');
   const [syncSource, setSyncSource] = useState(true);
   const [compiling, setCompiling] = useState(false);
   const [compileError, setCompileError] = useState<string | null>(null);
@@ -75,7 +75,7 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
   const [runsLoading, setRunsLoading] = useState(false);
 
   const [showCreateRepo, setShowCreateRepo] = useState(false);
-  const [newRepoName, setNewRepoName] = useState('netpulse-tv-apk');
+  const [newRepoName, setNewRepoName] = useState('tellybeam-tv-apk');
   const [newRepoPrivate, setNewRepoPrivate] = useState(false);
   const [creatingRepo, setCreatingRepo] = useState(false);
   const [createRepoError, setCreateRepoError] = useState<string | null>(null);
@@ -91,7 +91,7 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
   const buildGithubAuthHeaders = useCallback(
     (extra?: Record<string, string>): Record<string, string> => {
       const headers: Record<string, string> = {
-        'X-Requested-With': 'NetPulse',
+        'X-Requested-With': 'TellyBeam',
         ...extra,
       };
       if (ghSessionId) {
@@ -104,7 +104,7 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
 
   const refreshGithubStatusAndRepos = useCallback(
     async (explicitSessionId?: string | null) => {
-      const headers: Record<string, string> = { 'X-Requested-With': 'NetPulse' };
+      const headers: Record<string, string> = { 'X-Requested-With': 'TellyBeam' };
       const sid = explicitSessionId !== undefined ? explicitSessionId : ghSessionId;
       if (sid) headers.Authorization = `Bearer ${sid}`;
 
@@ -335,8 +335,8 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
           repo,
           branch: ghBranch.trim() || 'main',
           releaseTag: compileTag.trim() || 'v1.0.0',
-          appName: compileAppName.trim() || 'NetPulse TV',
-          appId: compileAppId.trim() || 'app.netpulse.tv',
+          appName: compileAppName.trim() || 'TellyBeam TV',
+          appId: compileAppId.trim() || 'app.tellybeam.tv',
           syncWorkflow: true,
           syncSource,
           serverUrl: '',
@@ -398,6 +398,12 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
         </div>
 
         <div className="p-6 space-y-5 max-h-[82vh] overflow-y-auto">
+          <div className="p-3 border border-blue-200 bg-blue-50/60 rounded-lg text-xs text-slate-700 leading-relaxed">
+            <strong className="text-slate-900">In-place upgrades enabled:</strong> Each repository
+            gets a persistent release signing key and auto-incrementing build version so future
+            APKs update right over your installed app without uninstalling.
+          </div>
+
           <div className="flex flex-wrap items-center justify-between gap-3 p-3.5 bg-slate-50 border border-slate-200 rounded-lg">
             <div className="text-xs font-mono text-slate-600">
               {ghStatus === null
@@ -489,7 +495,7 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
                     type="text"
                     value={newRepoName}
                     onChange={(e) => setNewRepoName(e.target.value)}
-                    placeholder="netpulse-tv-apk"
+                    placeholder="tellybeam-tv-apk"
                     aria-label="New GitHub repository name"
                     className="flex-1 h-9 px-3 text-xs font-mono bg-white border border-slate-200 rounded-md text-slate-900"
                   />
@@ -540,7 +546,7 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
                 type="text"
                 value={ghRepo}
                 onChange={(e) => setGhRepo(e.target.value)}
-                placeholder="Netpulse-tv-transfer"
+                placeholder="tellybeam-tv-apk"
                 className="w-full h-9 px-3 text-xs font-mono bg-white border border-slate-200 rounded-md text-slate-900"
               />
             </div>
@@ -580,7 +586,7 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
                 type="text"
                 value={compileAppName}
                 onChange={(e) => setCompileAppName(e.target.value)}
-                placeholder="NetPulse TV"
+                placeholder="TellyBeam TV"
                 className="w-full h-9 px-3 text-xs bg-white border border-slate-200 rounded-md text-slate-900"
               />
             </div>
@@ -593,7 +599,7 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
                 type="text"
                 value={compileAppId}
                 onChange={(e) => setCompileAppId(e.target.value)}
-                placeholder="app.netpulse.tv"
+                placeholder="app.tellybeam.tv"
                 className="w-full h-9 px-3 text-xs font-mono bg-white border border-slate-200 rounded-md text-slate-900"
               />
             </div>

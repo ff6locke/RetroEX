@@ -127,7 +127,7 @@ class MqttWssClient {
   private keepAliveTimer: number | null = null;
   private reconnectTimer: number | null = null;
   private connectTimeoutTimer: number | null = null;
-  private readonly clientId = `np_${randomHex(6)}`;
+  private readonly clientId = `tb_${randomHex(6)}`;
 
   constructor(
     private readonly topic: string,
@@ -370,7 +370,7 @@ export class P2pTransferSession {
     public readonly roomCode: string,
     private readonly callbacks: P2pSessionCallbacks
   ) {
-    const topic = `netpulse/p2p/v1/room/${roomCode}`;
+    const topic = `tellybeam/p2p/v1/room/${roomCode}`;
     this.callbacks.onStateChange('initializing', 'Connecting pairing relay...');
 
     this.mqtt = new MqttWssClient(
@@ -592,7 +592,7 @@ export class P2pTransferSession {
   private async startOffer(remoteId: string): Promise<void> {
     this.callbacks.onStateChange('pairing', 'Connecting directly to peer...');
     const pc = this.createPeerConnection(remoteId);
-    const dc = pc.createDataChannel('netpulse-files', { ordered: true });
+    const dc = pc.createDataChannel('tellybeam-files', { ordered: true });
     this.attachDataChannel(dc);
 
     try {

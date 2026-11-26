@@ -65,7 +65,7 @@ export default function App() {
       <header className="sticky top-0 z-20 bg-white/95 backdrop-blur-sm border-b border-slate-200">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-6">
           <span className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0">
-            NetPulse
+            TellyBeam
           </span>
 
           <div className="flex items-center gap-2.5 shrink-0">
@@ -100,7 +100,7 @@ export default function App() {
 
       <footer className="border-t border-slate-200 bg-white">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-xs text-slate-500">
-          <span>NetPulse · Direct Peer-to-Peer File &amp; APK Transfer for Android TV</span>
+          <span>TellyBeam · Direct Peer-to-Peer File &amp; APK Transfer for Android TV</span>
           <span>No local server required · Pair with a 6-digit code</span>
         </div>
       </footer>

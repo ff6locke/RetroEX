@@ -129,7 +129,7 @@ export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProp
           <div className="flex items-center gap-3">
             <Tv className="w-6 h-6 text-blue-400 shrink-0" />
             <span className="text-xl font-bold tracking-tight whitespace-nowrap">
-              NetPulse Direct Receiver
+              TellyBeam Direct Receiver
             </span>
           </div>
 
@@ -168,8 +168,8 @@ export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProp
           <div>
             <h1 className="text-xl font-semibold text-white">Pair Phone or Computer</h1>
             <p className="mt-1.5 text-sm text-slate-300">
-              Open NetPulse on your phone or computer under <strong>File Send</strong> and enter
-              this 6-digit code. Files transfer directly device-to-device with no local server.
+              Open TellyBeam on your phone or computer and enter this 6-digit code. Files transfer
+              directly device-to-device with no local server.
             </p>
           </div>
 
@@ -190,7 +190,7 @@ export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProp
                 <div className="min-w-0 space-y-2 text-sm">
                   <div className="font-semibold text-white">Scan to Send Files</div>
                   <p className="text-xs text-slate-300 leading-relaxed">
-                    Opens NetPulse File Send linked directly to code{' '}
+                    Opens TellyBeam File Send linked directly to code{' '}
                     <span className="font-mono text-white">{roomCode}</span>.
                   </p>
                   <div className="text-xs font-mono text-blue-300 break-all">{senderUrl}</div>

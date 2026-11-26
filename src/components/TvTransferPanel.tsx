@@ -436,7 +436,7 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
                   Open on Your Smart TV Browser
                 </div>
                 <p className="text-xs text-slate-600 leading-relaxed">
-                  Or open the NetPulse TV app and enter code{' '}
+                  Or open the TellyBeam TV app and enter code{' '}
                   <span className="font-mono font-semibold text-slate-900">{roomCode}</span>.
                 </p>
                 <button
