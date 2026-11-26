@@ -1,7 +1,9 @@
 import { useMemo, useState } from 'react';
-import { Tv } from 'lucide-react';
+import { Hammer, Tv } from 'lucide-react';
+import { BuildApkModal } from './components/BuildApkModal';
 import { TvReceiverView } from './components/TvReceiverView';
 import { TvTransferPanel } from './components/TvTransferPanel';
+import { isNativeCapacitorOrigin } from './utils/apiUrl';
 
 function getInitialRouteState(): {
   tvMode: boolean;
@@ -27,6 +29,8 @@ export default function App() {
   const initialRoute = useMemo(() => getInitialRouteState(), []);
   const [tvReceiverMode, setTvReceiverMode] = useState(initialRoute.tvMode);
   const [tvRoomCode, setTvRoomCode] = useState<string | undefined>(initialRoute.tvCode);
+  const [showBuildModal, setShowBuildModal] = useState(false);
+  const isNativeApk = isNativeCapacitorOrigin();
 
   const openTvReceiver = (code?: string) => {
     const targetCode = code ?? tvRoomCode;
@@ -64,14 +68,26 @@ export default function App() {
             NetPulse
           </span>
 
-          <button
-            type="button"
-            onClick={() => openTvReceiver()}
-            className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 transition-colors whitespace-nowrap shrink-0"
-          >
-            <Tv className="w-4 h-4" />
-            TV Receiver Screen
-          </button>
+          <div className="flex items-center gap-2.5 shrink-0">
+            {!isNativeApk && (
+              <button
+                type="button"
+                onClick={() => setShowBuildModal(true)}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-200 rounded-md hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0"
+              >
+                <Hammer className="w-4 h-4" />
+                Build APK
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => openTvReceiver()}
+              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 transition-colors whitespace-nowrap shrink-0"
+            >
+              <Tv className="w-4 h-4" />
+              TV Receiver Screen
+            </button>
+          </div>
         </div>
       </header>
 
@@ -88,6 +104,10 @@ export default function App() {
           <span>No local server required · Pair with a 6-digit code</span>
         </div>
       </footer>
+
+      {!isNativeApk && (
+        <BuildApkModal open={showBuildModal} onClose={() => setShowBuildModal(false)} />
+      )}
     </div>
   );
 }
