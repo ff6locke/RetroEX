@@ -1429,6 +1429,11 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
                         <span className="font-mono text-slate-500">
                           · {run.headBranch} · {new Date(run.createdAt).toLocaleString()}
                         </span>
+                        {run.failedStep && (
+                          <span className="text-red-700 font-mono">
+                            ({run.failedStep})
+                          </span>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-2.5">

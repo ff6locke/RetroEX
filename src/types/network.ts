@@ -55,6 +55,7 @@ export interface GithubWorkflowRun {
   createdAt: string;
   updatedAt: string;
   headBranch: string;
+  failedStep?: string;
 }
 
 export interface GithubReleaseAsset {

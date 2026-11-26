@@ -51,7 +51,7 @@ jobs:
         env:
           VITE_API_BASE_URL: ${{ github.event.inputs.server_url || '' }}
         run: |
-          npm install --no-audit --no-fund
+          npm install --no-audit --no-fund --legacy-peer-deps
           npm run build
 
       - name: Package Android & TV project with Capacitor
@@ -60,20 +60,23 @@ jobs:
           APP_ID: ${{ github.event.inputs.app_id || 'app.netpulse.tv' }}
         run: |
           rm -rf android capacitor.config.json capacitor.config.ts
-          npm install --no-save @capacitor/core@^8 @capacitor/cli@^8 @capacitor/android@^8
-          npx cap init "$APP_NAME" "$APP_ID" --web-dir dist
+          npm install --no-save --legacy-peer-deps @capacitor/core@^8 @capacitor/cli@^8 @capacitor/android@^8
+          node -e '
+            const fs = require("fs");
+            fs.writeFileSync("capacitor.config.json", JSON.stringify({
+              appId: process.env.APP_ID || "app.netpulse.tv",
+              appName: process.env.APP_NAME || "NetPulse TV",
+              webDir: "dist",
+              android: { allowMixedContent: true }
+            }, null, 2));
+          '
           npx cap add android
           node -e '
             const fs = require("fs");
-            const cfgPath = "capacitor.config.json";
-            const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
-            cfg.android = { ...(cfg.android || {}), allowMixedContent: true };
-            fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
-
             const manifestPath = "android/app/src/main/AndroidManifest.xml";
             let xml = fs.readFileSync(manifestPath, "utf8");
             if (!xml.includes("android:usesCleartextTraffic")) {
-              xml = xml.replace("<application", "<application android:usesCleartextTraffic=\"true\"");
+              xml = xml.replace("<application", "<application\n        android:usesCleartextTraffic=\"true\"");
             }
             if (!xml.includes("android.software.leanback")) {
               xml = xml.replace(
