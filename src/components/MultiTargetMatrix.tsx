@@ -6,6 +6,7 @@ import {
   measureBrowserPing,
   normalizeBrowserProbeUrl,
 } from '../utils/networkProbes';
+import { hasReachableBackendConfig } from '../utils/apiUrl';
 
 const INITIAL_TARGETS: MultiTargetRow[] = [
   {
@@ -125,7 +126,11 @@ function computeRowStats(samples: number[]) {
 }
 
 export function MultiTargetMatrix() {
-  const [rows, setRows] = useState<MultiTargetRow[]>(INITIAL_TARGETS);
+  const [rows, setRows] = useState<MultiTargetRow[]>(() =>
+    hasReachableBackendConfig()
+      ? INITIAL_TARGETS
+      : INITIAL_TARGETS.filter((t) => t.id !== 'server-edge')
+  );
   const [customInput, setCustomInput] = useState('');
   const [inputError, setInputError] = useState<string | null>(null);
   const [isProbingAll, setIsProbingAll] = useState(false);

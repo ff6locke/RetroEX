@@ -30,6 +30,7 @@ import {
   apiUrl,
   getApiBaseUrl,
   getPublicAppOrigin,
+  hasReachableBackendConfig,
   isAiStudioAuthGatedUrl,
   isNativeCapacitorOrigin,
   setSavedApiBaseOverride,
@@ -185,7 +186,7 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
   const formatRoomNetworkError = useCallback((err: unknown, fallback: string): string => {
     const msg = err instanceof Error ? err.message : fallback;
     const base = getApiBaseUrl();
-    if (/failed to fetch|networkerror|load failed/i.test(msg)) {
+    if (/failed to fetch|networkerror|load failed|returned non-json response/i.test(msg)) {
       setNeedsServerConfig(true);
       if (isNativeCapacitorOrigin() && (!base || isAiStudioAuthGatedUrl(base))) {
         return 'Cannot reach the AI Studio dev URL from this standalone APK because AI Studio requires Google login cookies. Deploy the app to Cloud Run (or run NetPulse locally on your Wi-Fi) and enter that public server URL below.';
@@ -195,7 +196,13 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
     return msg;
   }, []);
 
-  const createRoom = useCallback(async () => {
+  const createRoom = useCallback(async (force = false) => {
+    if (!force && !hasReachableBackendConfig()) {
+      setRoomLoading(false);
+      setRoomError(null);
+      setNeedsServerConfig(true);
+      return;
+    }
     setRoomLoading(true);
     setRoomError(null);
     try {
@@ -220,6 +227,16 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
 
   const joinRoom = useCallback(
     async (code: string, fallbackToCreate = false) => {
+      if (!hasReachableBackendConfig()) {
+        setRoomLoading(false);
+        setNeedsServerConfig(true);
+        setRoomError(
+          fallbackToCreate
+            ? null
+            : 'Enter a reachable Cloud Run or local LAN NetPulse Server URL below before pairing.'
+        );
+        return;
+      }
       const clean = code.replace(/\D/g, '').slice(0, 6);
       if (clean.length !== 6) {
         setRoomError('Enter a 6-digit TV pairing code.');
@@ -236,7 +253,7 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
         );
         if (!res.ok || !data.ok || !data.room) {
           if (fallbackToCreate) {
-            await createRoom();
+            await createRoom(true);
             return;
           }
           setRoomError(data.error || `Room ${clean} not found or expired.`);
@@ -278,7 +295,13 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
   );
 
   const refreshGithubStatusAndRepos = useCallback(
-    async (explicitSessionId?: string | null) => {
+    async (explicitSessionId?: string | null, force = false) => {
+      if (!force && !hasReachableBackendConfig()) {
+        setGhStatus({ ok: true, configured: false });
+        setGhAuthError(null);
+        setGhRepos([]);
+        return;
+      }
       const headers: Record<string, string> = { 'X-Requested-With': 'NetPulse' };
       const sid = explicitSessionId !== undefined ? explicitSessionId : ghSessionId;
       if (sid) headers.Authorization = `Bearer ${sid}`;
@@ -428,12 +451,15 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
   };
 
   const handleDeleteFile = async (fileId: string) => {
-    if (!room?.code) return;
+    if (!room?.code || !hasReachableBackendConfig()) return;
     try {
       const res = await fetch(apiUrl(`/api/tv/rooms/${room.code}/files/${fileId}`), {
         method: 'DELETE',
       });
-      const data = await res.json();
+      const data = await readJsonSafe<{ ok: boolean; room?: TvTransferRoom }>(
+        res,
+        'Delete room file'
+      );
       if (res.ok && data.ok && data.room) {
         setRoom(data.room);
       }
@@ -451,6 +477,12 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
   };
 
   const handleConnectGithub = async () => {
+    if (!hasReachableBackendConfig()) {
+      setGhAuthError(
+        'Connect a reachable Cloud Run or local LAN NetPulse Server URL above first to use GitHub OAuth & Actions compilation from this APK.'
+      );
+      return;
+    }
     setGhConnecting(true);
     setGhAuthError(null);
     try {
@@ -691,7 +723,60 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
       setReleasesError(null);
       setReleases([]);
 
+      const fetchPublicGithubReleases = async (): Promise<boolean> => {
+        const publicRes = await fetch(
+          `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases?per_page=15`,
+          { headers: { Accept: 'application/vnd.github+json' } }
+        );
+        if (!publicRes.ok) {
+          throw new Error(`GitHub returned HTTP ${publicRes.status} for ${owner}/${repo}.`);
+        }
+        const raw = (await publicRes.json()) as Array<{
+          id: number;
+          tag_name: string;
+          name: string | null;
+          prerelease: boolean;
+          draft: boolean;
+          published_at: string | null;
+          html_url: string;
+          assets: Array<{
+            id: number;
+            name: string;
+            size: number;
+            content_type: string;
+            download_count: number;
+            browser_download_url: string;
+          }>;
+        }>;
+        setReleases(
+          raw.map((r) => ({
+            id: r.id,
+            tagName: r.tag_name,
+            name: r.name || r.tag_name,
+            prerelease: r.prerelease,
+            draft: r.draft,
+            publishedAt: r.published_at,
+            htmlUrl: r.html_url,
+            assets: (r.assets || []).map((a) => ({
+              id: a.id,
+              name: a.name,
+              size: a.size,
+              contentType: a.content_type,
+              downloadCount: a.download_count,
+              browserDownloadUrl: a.browser_download_url,
+              isApk: /\.(apk|xapk|apks)$/i.test(a.name),
+            })),
+          }))
+        );
+        return true;
+      };
+
       try {
+        if (!hasReachableBackendConfig()) {
+          await fetchPublicGithubReleases();
+          return;
+        }
+
         const res = await fetch(
           apiUrl(`/api/github/releases?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}`),
           { cache: 'no-store', headers: buildGithubAuthHeaders() }
@@ -707,52 +792,9 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
         }
         setReleases(data.releases || []);
       } catch (err) {
-        // Fallback directly to public GitHub API when running inside standalone APK without NetPulse backend
         try {
-          const publicRes = await fetch(
-            `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases?per_page=15`,
-            { headers: { Accept: 'application/vnd.github+json' } }
-          );
-          if (publicRes.ok) {
-            const raw = (await publicRes.json()) as Array<{
-              id: number;
-              tag_name: string;
-              name: string | null;
-              prerelease: boolean;
-              draft: boolean;
-              published_at: string | null;
-              html_url: string;
-              assets: Array<{
-                id: number;
-                name: string;
-                size: number;
-                content_type: string;
-                download_count: number;
-                browser_download_url: string;
-              }>;
-            }>;
-            setReleases(
-              raw.map((r) => ({
-                id: r.id,
-                tagName: r.tag_name,
-                name: r.name || r.tag_name,
-                prerelease: r.prerelease,
-                draft: r.draft,
-                publishedAt: r.published_at,
-                htmlUrl: r.html_url,
-                assets: (r.assets || []).map((a) => ({
-                  id: a.id,
-                  name: a.name,
-                  size: a.size,
-                  contentType: a.content_type,
-                  downloadCount: a.download_count,
-                  browserDownloadUrl: a.browser_download_url,
-                  isApk: /\.(apk|xapk|apks)$/i.test(a.name),
-                })),
-              }))
-            );
-            return;
-          }
+          await fetchPublicGithubReleases();
+          return;
         } catch {
           // Ignore fallback failure and surface original error
         }
@@ -918,19 +960,47 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
           </div>
         </div>
 
-        {roomError && (
-          <div className="p-3.5 border border-red-200 bg-red-50/70 rounded-md text-sm text-red-800 space-y-3">
-            <div>{roomError}</div>
+        {(roomError || (!room && !roomLoading && needsServerConfig)) && (
+          <div
+            className={`p-4 border rounded-md text-sm space-y-3 ${
+              roomError
+                ? 'border-red-200 bg-red-50/70 text-red-800'
+                : 'border-blue-200 bg-blue-50/60 text-slate-800'
+            }`}
+          >
+            {roomError ? (
+              <div>{roomError}</div>
+            ) : (
+              <div className="space-y-1">
+                <div className="font-semibold text-slate-900">
+                  Connect NetPulse Server (Optional for Standalone APK)
+                </div>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Network diagnostics and public <strong>Release APKs</strong> work standalone on
+                  this device with no server required. To create or join live 6-digit TV Transfer
+                  rooms from inside the APK, enter your deployed public Cloud Run URL or a local
+                  Wi-Fi NetPulse server (<span className="font-mono">npm start</span> on your PC).
+                </p>
+              </div>
+            )}
             {(needsServerConfig || isNativeCapacitorOrigin()) && (
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
                   const saved = setSavedApiBaseOverride(serverUrlInput);
                   setServerUrlInput(saved);
-                  void createRoom();
-                  void refreshGithubStatusAndRepos();
+                  if (!saved || !hasReachableBackendConfig()) {
+                    setRoomError(
+                      'Enter a valid public https:// Cloud Run URL or local LAN http://192.168.x.x:3000 server URL (private ais-dev preview URLs require browser Google cookies).'
+                    );
+                    return;
+                  }
+                  void createRoom(true);
+                  void refreshGithubStatusAndRepos(undefined, true);
                 }}
-                className="flex flex-col sm:flex-row sm:items-center gap-2 pt-2 border-t border-red-200/80"
+                className={`flex flex-col sm:flex-row sm:items-center gap-2 pt-2 border-t ${
+                  roomError ? 'border-red-200/80' : 'border-blue-200/80'
+                }`}
               >
                 <input
                   type="url"
@@ -938,7 +1008,7 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
                   onChange={(e) => setServerUrlInput(e.target.value)}
                   placeholder="https://your-deployed-app.run.app or http://192.168.1.10:3000"
                   aria-label="NetPulse backend server URL"
-                  className="flex-1 h-9 px-3 text-xs font-mono bg-white border border-red-300 rounded-md text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600/20 focus:border-blue-600"
+                  className="flex-1 h-9 px-3 text-xs font-mono bg-white border border-slate-300 rounded-md text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600/20 focus:border-blue-600"
                 />
                 <div className="flex items-center gap-2 shrink-0">
                   <button
@@ -952,6 +1022,8 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
                     onClick={() => {
                       setSavedApiBaseOverride('');
                       setServerUrlInput('');
+                      setRoomError(null);
+                      setNeedsServerConfig(!hasReachableBackendConfig());
                     }}
                     className="h-9 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 whitespace-nowrap"
                   >

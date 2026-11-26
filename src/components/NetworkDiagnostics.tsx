@@ -8,7 +8,13 @@ import {
   measureServerTcpPing,
   normalizeBrowserProbeUrl,
 } from '../utils/networkProbes';
-import { apiUrl, getApiBaseUrl, isAiStudioAuthGatedUrl, isNativeCapacitorOrigin } from '../utils/apiUrl';
+import {
+  apiUrl,
+  getApiBaseUrl,
+  hasReachableBackendConfig,
+  isAiStudioAuthGatedUrl,
+  isNativeCapacitorOrigin,
+} from '../utils/apiUrl';
 
 type CheckStatus = 'pending' | 'running' | 'pass' | 'warn' | 'fail';
 
@@ -142,14 +148,17 @@ export function NetworkDiagnostics({ networkCtx, onOpenLivePing }: NetworkDiagno
       updateStage('adapter', { status: 'running', summary: 'Checking network adapter and observed IP...' });
       const online = navigator.onLine;
       let observedIp = networkCtx.observedIp;
-      try {
-        const res = await fetch(apiUrl('/api/network-info'), { cache: 'no-store', signal: controller.signal });
-        if (res.ok) {
-          const data = await res.json();
-          if (typeof data.observedIp === 'string') observedIp = data.observedIp;
+      if (hasReachableBackendConfig()) {
+        try {
+          const res = await fetch(apiUrl('/api/network-info'), { cache: 'no-store', signal: controller.signal });
+          if (res.ok) {
+            const text = await res.text();
+            const data = JSON.parse(text);
+            if (typeof data.observedIp === 'string') observedIp = data.observedIp;
+          }
+        } catch {
+          // Handled below via online/edge checks
         }
-      } catch {
-        // Handled below via online/edge checks
       }
 
       if (!online) {
@@ -441,19 +450,25 @@ export function NetworkDiagnostics({ networkCtx, onOpenLivePing }: NetworkDiagno
     try {
       const [browserSample, dnsRes] = await Promise.all([
         measureBrowserPing(normalized.url, normalized.displayTarget, 1, 3500),
-        fetch(apiUrl('/api/probe/dns'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ host: cleanHost }),
-        })
-          .then((r) => r.json() as Promise<DnsLookupResult>)
-          .catch(
-            (): DnsLookupResult => ({
+        hasReachableBackendConfig()
+          ? fetch(apiUrl('/api/probe/dns'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ host: cleanHost }),
+            })
+              .then(async (r) => JSON.parse(await r.text()) as DnsLookupResult)
+              .catch(
+                (): DnsLookupResult => ({
+                  ok: false,
+                  host: cleanHost,
+                  error: 'NetPulse cloud server unreachable from standalone APK (connect server in TV Transfer tab).',
+                })
+              )
+          : Promise.resolve<DnsLookupResult>({
               ok: false,
               host: cleanHost,
-              error: 'NetPulse cloud server unreachable from standalone APK (connect server in TV Transfer tab).',
-            })
-          ),
+              error: 'Standalone APK mode (connect a NetPulse Server URL in TV Transfer to add cloud server comparison).',
+            }),
       ]);
 
       let serverTcpSample: PingSample | null = null;

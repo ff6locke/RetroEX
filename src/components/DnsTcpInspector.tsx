@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Globe, Server } from 'lucide-react';
 import type { DnsLookupResult, PingSample } from '../types/network';
 import { formatMs, measureServerTcpPing } from '../utils/networkProbes';
-import { apiUrl } from '../utils/apiUrl';
+import { apiUrl, hasReachableBackendConfig } from '../utils/apiUrl';
 
 const QUICK_HOSTS = ['cloudflare.com', 'dns.google', 'github.com', '1.1.1.1', '8.8.8.8'];
 const COMMON_PORTS = [443, 80, 53, 22];
@@ -30,20 +30,29 @@ export function DnsTcpInspector() {
       let dnsData: DnsLookupResult | null = null;
       let usedDohFallback = false;
 
-      try {
-        const dnsRes = await fetch(apiUrl('/api/probe/dns'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ host: cleanHost }),
-        });
-        const parsed = (await dnsRes.json()) as DnsLookupResult;
-        if (!dnsRes.ok || !parsed.ok) {
-          setError(parsed.error || 'DNS resolution failed.');
-          setLoading(false);
-          return;
+      if (hasReachableBackendConfig()) {
+        try {
+          const dnsRes = await fetch(apiUrl('/api/probe/dns'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ host: cleanHost }),
+          });
+          const text = await dnsRes.text();
+          const parsed = JSON.parse(text) as DnsLookupResult;
+          if (!dnsRes.ok || !parsed.ok) {
+            setError(parsed.error || 'DNS resolution failed.');
+            setLoading(false);
+            return;
+          }
+          dnsData = parsed;
+        } catch {
+          usedDohFallback = true;
         }
-        dnsData = parsed;
-      } catch {
+      } else {
+        usedDohFallback = true;
+      }
+
+      if (!dnsData) {
         // Standalone APK fallback via public CORS-enabled Google DNS-over-HTTPS
         usedDohFallback = true;
         const start = performance.now();
@@ -87,7 +96,7 @@ export function DnsTcpInspector() {
 
       if (usedDohFallback) {
         setError(
-          'Resolved DNS directly via Google DoH (no NetPulse server connected for server-side TCP socket checks).'
+          'Resolved DNS directly via Google DoH (connect a NetPulse Server URL in TV Transfer to also run server-side TCP socket checks).'
         );
         return;
       }

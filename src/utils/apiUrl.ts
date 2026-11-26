@@ -66,6 +66,14 @@ export function getApiBaseUrl(): string {
   return '';
 }
 
+export function hasReachableBackendConfig(): boolean {
+  if (!isNativeCapacitorOrigin()) return true;
+  const base = getApiBaseUrl();
+  if (!base) return false;
+  if (isAiStudioAuthGatedUrl(base)) return false;
+  return true;
+}
+
 export function apiUrl(path: string): string {
   if (/^https?:\/\//i.test(path)) return path;
   const cleanPath = path.startsWith('/') ? path : `/${path}`;

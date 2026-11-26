@@ -25,7 +25,13 @@ import {
   measureServerTcpPing,
   normalizeBrowserProbeUrl,
 } from './utils/networkProbes';
-import { apiUrl, getApiBaseUrl, isAiStudioAuthGatedUrl, isNativeCapacitorOrigin } from './utils/apiUrl';
+import {
+  apiUrl,
+  getApiBaseUrl,
+  hasReachableBackendConfig,
+  isAiStudioAuthGatedUrl,
+  isNativeCapacitorOrigin,
+} from './utils/apiUrl';
 
 const HISTORY_STORAGE_KEY = 'netpulse_session_history_v1';
 
@@ -132,17 +138,24 @@ export default function App() {
     const refreshNetworkContext = async () => {
       const conn = getNavigatorConnection();
       let observedIp = networkCtx.observedIp;
-      try {
-        const res = await fetch(apiUrl('/api/network-info'), { cache: 'no-store' });
-        if (res.ok) {
-          const data = await res.json();
-          if (typeof data.observedIp === 'string') {
-            observedIp = data.observedIp;
+      if (!hasReachableBackendConfig()) {
+        observedIp = 'Standalone APK (On-Device)';
+      } else {
+        try {
+          const res = await fetch(apiUrl('/api/network-info'), { cache: 'no-store' });
+          const contentType = res.headers.get('content-type') || '';
+          if (res.ok && contentType.includes('application/json')) {
+            const data = await res.json();
+            if (typeof data.observedIp === 'string') {
+              observedIp = data.observedIp;
+            }
+          } else if (observedIp === 'Detecting...') {
+            observedIp = 'Unavailable';
           }
-        }
-      } catch {
-        if (observedIp === 'Detecting...') {
-          observedIp = 'Unavailable';
+        } catch {
+          if (observedIp === 'Detecting...') {
+            observedIp = 'Unavailable';
+          }
         }
       }
       if (!active) return;

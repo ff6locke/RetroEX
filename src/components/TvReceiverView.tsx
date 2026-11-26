@@ -6,6 +6,7 @@ import {
   apiUrl,
   getApiBaseUrl,
   getPublicAppOrigin,
+  hasReachableBackendConfig,
   isAiStudioAuthGatedUrl,
   isNativeCapacitorOrigin,
   setSavedApiBaseOverride,
@@ -46,6 +47,22 @@ function FileIcon({ name }: { name: string }) {
   return <FileBox className="w-6 h-6 text-slate-300 shrink-0" />;
 }
 
+async function readJsonSafe<T = Record<string, unknown>>(
+  res: Response,
+  endpointLabel: string
+): Promise<T> {
+  const text = await res.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    const titleMatch = text.match(/<title>([^<]+)<\/title>/i);
+    const hint = titleMatch?.[1]?.trim() || text.replace(/\s+/g, ' ').slice(0, 100);
+    throw new Error(
+      `${endpointLabel} returned non-JSON response (HTTP ${res.status}): ${hint || 'Empty response'}`
+    );
+  }
+}
+
 export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProps) {
   const [room, setRoom] = useState<TvTransferRoom | null>(null);
   const [joinInput, setJoinInput] = useState(initialCode || '');
@@ -59,24 +76,32 @@ export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProp
   const formatRoomError = useCallback((err: unknown, fallback: string): string => {
     const msg = err instanceof Error ? err.message : fallback;
     const base = getApiBaseUrl();
-    if (/failed to fetch|networkerror|load failed/i.test(msg)) {
-      if (isNativeCapacitorOrigin() && (!base || isAiStudioAuthGatedUrl(base))) {
-        setNeedsServerConfig(true);
-        return 'Cannot connect from APK: the AI Studio dev URL requires Google login cookies. Enter your deployed public NetPulse URL or local LAN server (e.g. http://192.168.1.10:3000) below.';
-      }
+    if (/failed to fetch|networkerror|load failed|returned non-json response/i.test(msg)) {
       setNeedsServerConfig(true);
+      if (isNativeCapacitorOrigin() && (!base || isAiStudioAuthGatedUrl(base))) {
+        return 'Standalone APK mode: connect a deployed Cloud Run URL or local LAN NetPulse server (e.g. http://192.168.1.10:3000) below to pair TV Transfer rooms.';
+      }
       return `Unable to reach NetPulse server (${base || 'same origin'}). Check Wi-Fi or enter your server URL below.`;
     }
     return msg;
   }, []);
 
-  const createNewRoom = useCallback(async () => {
+  const createNewRoom = useCallback(async (force = false) => {
+    if (!force && !hasReachableBackendConfig()) {
+      setLoading(false);
+      setError(null);
+      setNeedsServerConfig(true);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
       const res = await fetch(apiUrl('/api/tv/rooms'), { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok || !data.ok) {
+      const data = await readJsonSafe<{ ok: boolean; error?: string; room?: TvTransferRoom }>(
+        res,
+        'Create TV room'
+      );
+      if (!res.ok || !data.ok || !data.room) {
         setError(data.error || 'Unable to start a TV receiver session.');
         return;
       }
@@ -92,6 +117,16 @@ export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProp
 
   const joinRoomByCode = useCallback(
     async (code: string, fallbackToCreate = false) => {
+      if (!hasReachableBackendConfig()) {
+        setLoading(false);
+        setNeedsServerConfig(true);
+        setError(
+          fallbackToCreate
+            ? null
+            : 'Enter your deployed Cloud Run or local LAN NetPulse Server URL below before pairing.'
+        );
+        return;
+      }
       const clean = code.replace(/\D/g, '').slice(0, 6);
       if (clean.length !== 6) {
         setError('Enter a valid 6-digit pairing code.');
@@ -102,10 +137,13 @@ export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProp
       setError(null);
       try {
         const res = await fetch(apiUrl(`/api/tv/rooms/${clean}`), { cache: 'no-store' });
-        const data = await res.json();
-        if (!res.ok || !data.ok) {
+        const data = await readJsonSafe<{ ok: boolean; error?: string; room?: TvTransferRoom }>(
+          res,
+          'Join TV room'
+        );
+        if (!res.ok || !data.ok || !data.room) {
           if (fallbackToCreate) {
-            await createNewRoom();
+            await createNewRoom(true);
             return;
           }
           setError(data.error || `Room ${clean} was not found or expired.`);
@@ -233,8 +271,21 @@ export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProp
               </div>
             </div>
           ) : (
-            <div className="py-12 text-center text-sm text-slate-400">
-              {loading ? 'Preparing TV pairing code...' : 'No active TV room.'}
+            <div className="py-8 px-4 bg-slate-950 border border-slate-800 rounded-lg text-center space-y-2">
+              <div className="text-sm font-medium text-slate-200">
+                {loading
+                  ? 'Preparing TV pairing code...'
+                  : needsServerConfig
+                    ? 'NetPulse Server Not Connected'
+                    : 'No active TV room.'}
+              </div>
+              {!loading && needsServerConfig && (
+                <p className="text-xs text-slate-400 leading-relaxed max-w-sm mx-auto">
+                  This standalone APK runs network diagnostics directly on your TV. To receive
+                  wireless file transfers from your phone, enter your deployed Cloud Run URL or
+                  local Wi-Fi NetPulse server URL below.
+                </p>
+              )}
             </div>
           )}
 
@@ -280,7 +331,13 @@ export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProp
                 e.preventDefault();
                 const saved = setSavedApiBaseOverride(serverUrlInput);
                 setServerUrlInput(saved);
-                void createNewRoom();
+                if (!saved || !hasReachableBackendConfig()) {
+                  setError(
+                    'Enter a valid public https:// Cloud Run URL or local LAN http://192.168.x.x:3000 server URL (ais-dev preview URLs cannot be accessed from an APK).'
+                  );
+                  return;
+                }
+                void createNewRoom(true);
               }}
               className="pt-4 border-t border-slate-800 space-y-2.5"
             >
