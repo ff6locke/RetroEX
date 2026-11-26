@@ -1,0 +1,122 @@
+name: Build and Publish Android APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+      app_name:
+        description: 'Android application display name'
+        required: false
+        default: 'NetPulse TV'
+      app_id:
+        description: 'Android package ID'
+        required: false
+        default: 'app.netpulse.tv'
+      server_url:
+        description: 'Optional NetPulse backend base URL for APK API calls'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies and build web bundle
+        env:
+          VITE_API_BASE_URL: ${{ github.event.inputs.server_url || '' }}
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+
+      - name: Package Android & TV project with Capacitor
+        env:
+          APP_NAME: ${{ github.event.inputs.app_name || 'NetPulse TV' }}
+          APP_ID: ${{ github.event.inputs.app_id || 'app.netpulse.tv' }}
+        run: |
+          rm -rf android capacitor.config.json capacitor.config.ts
+          npm install --no-save @capacitor/core@^8 @capacitor/cli@^8 @capacitor/android@^8
+          npx cap init "$APP_NAME" "$APP_ID" --web-dir dist
+          npx cap add android
+          node -e '
+            const fs = require("fs");
+            const cfgPath = "capacitor.config.json";
+            const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+            cfg.android = { ...(cfg.android || {}), allowMixedContent: true };
+            fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
+
+            const manifestPath = "android/app/src/main/AndroidManifest.xml";
+            let xml = fs.readFileSync(manifestPath, "utf8");
+            if (!xml.includes("android:usesCleartextTraffic")) {
+              xml = xml.replace("<application", "<application android:usesCleartextTraffic=\"true\"");
+            }
+            if (!xml.includes("android.software.leanback")) {
+              xml = xml.replace(
+                "<application",
+                "<uses-feature android:name=\"android.software.leanback\" android:required=\"false\" />\n    <uses-feature android:name=\"android.hardware.touchscreen\" android:required=\"false\" />\n    <application"
+              );
+            }
+            if (!xml.includes("android.intent.category.LEANBACK_LAUNCHER")) {
+              xml = xml.replace(
+                "<category android:name=\"android.intent.category.LAUNCHER\" />",
+                "<category android:name=\"android.intent.category.LAUNCHER\" />\n                <category android:name=\"android.intent.category.LEANBACK_LAUNCHER\" />"
+              );
+            }
+            fs.writeFileSync(manifestPath, xml);
+          '
+          npx cap sync android
+
+      - name: Build Android APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Prepare APK artifact
+        env:
+          TAG_NAME: ${{ github.event.inputs.release_tag || github.ref_name || 'v1.0.0' }}
+        run: |
+          mkdir -p release-assets
+          cp android/app/build/outputs/apk/debug/app-debug.apk "release-assets/netpulse-tv-${TAG_NAME}.apk"
+
+      - name: Upload APK build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: netpulse-tv-apk
+          path: release-assets/*.apk
+          retention-days: 30
+
+      - name: Publish APK to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name || 'v1.0.0' }}
+          name: "NetPulse TV ${{ github.event.inputs.release_tag || github.ref_name || 'v1.0.0' }}"
+          body: "Automated Android & TV APK build from GitHub Actions."
+          files: release-assets/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
