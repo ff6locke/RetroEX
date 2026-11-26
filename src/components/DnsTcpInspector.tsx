@@ -27,18 +27,70 @@ export function DnsTcpInspector() {
     setTcpSamples([]);
 
     try {
-      const dnsRes = await fetch(apiUrl('/api/probe/dns'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ host: cleanHost }),
-      });
-      const dnsData = (await dnsRes.json()) as DnsLookupResult;
-      if (!dnsRes.ok || !dnsData.ok) {
-        setError(dnsData.error || 'DNS resolution failed.');
-        setLoading(false);
+      let dnsData: DnsLookupResult | null = null;
+      let usedDohFallback = false;
+
+      try {
+        const dnsRes = await fetch(apiUrl('/api/probe/dns'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host: cleanHost }),
+        });
+        const parsed = (await dnsRes.json()) as DnsLookupResult;
+        if (!dnsRes.ok || !parsed.ok) {
+          setError(parsed.error || 'DNS resolution failed.');
+          setLoading(false);
+          return;
+        }
+        dnsData = parsed;
+      } catch {
+        // Standalone APK fallback via public CORS-enabled Google DNS-over-HTTPS
+        usedDohFallback = true;
+        const start = performance.now();
+        const [aRes, aaaaRes, cnameRes] = await Promise.all([
+          fetch(`https://dns.google/resolve?name=${encodeURIComponent(cleanHost)}&type=A`),
+          fetch(`https://dns.google/resolve?name=${encodeURIComponent(cleanHost)}&type=AAAA`),
+          fetch(`https://dns.google/resolve?name=${encodeURIComponent(cleanHost)}&type=CNAME`),
+        ]);
+        const resolveMs = Math.round((performance.now() - start) * 100) / 100;
+        const aJson = (await aRes.json()) as { Answer?: Array<{ type: number; data: string }> };
+        const aaaaJson = (await aaaaRes.json()) as { Answer?: Array<{ type: number; data: string }> };
+        const cnameJson = (await cnameRes.json()) as { Answer?: Array<{ type: number; data: string }> };
+
+        const ipv4 = (aJson.Answer || []).filter((r) => r.type === 1).map((r) => r.data);
+        const ipv6 = (aaaaJson.Answer || []).filter((r) => r.type === 28).map((r) => r.data);
+        const cname = (cnameJson.Answer || [])
+          .filter((r) => r.type === 5)
+          .map((r) => r.data.replace(/\.$/, ''));
+
+        if (ipv4.length === 0 && ipv6.length === 0 && cname.length === 0) {
+          setError(`No public DNS records found for ${cleanHost}.`);
+          setLoading(false);
+          return;
+        }
+
+        dnsData = {
+          ok: true,
+          host: cleanHost,
+          resolveMs,
+          addresses: [
+            ...ipv4.map((address) => ({ address, family: 4 as const })),
+            ...ipv6.map((address) => ({ address, family: 6 as const })),
+          ],
+          ipv4,
+          ipv6,
+          cname,
+        };
+      }
+
+      setDnsResult(dnsData);
+
+      if (usedDohFallback) {
+        setError(
+          'Resolved DNS directly via Google DoH (no NetPulse server connected for server-side TCP socket checks).'
+        );
         return;
       }
-      setDnsResult(dnsData);
 
       const collected: PingSample[] = [];
       for (let seq = 1; seq <= 4; seq++) {

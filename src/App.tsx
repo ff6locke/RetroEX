@@ -25,7 +25,7 @@ import {
   measureServerTcpPing,
   normalizeBrowserProbeUrl,
 } from './utils/networkProbes';
-import { apiUrl } from './utils/apiUrl';
+import { apiUrl, getApiBaseUrl, isAiStudioAuthGatedUrl, isNativeCapacitorOrigin } from './utils/apiUrl';
 
 const HISTORY_STORAGE_KEY = 'netpulse_session_history_v1';
 
@@ -79,7 +79,11 @@ export default function App() {
   const [tvRoomCode, setTvRoomCode] = useState<string | undefined>(initialRoute.tvCode);
   const [activeNav, setActiveNav] = useState<NavSection>(initialRoute.nav);
   const [mode, setMode] = useState<ProbeMode>('browser');
-  const [targetInput, setTargetInput] = useState('/api/ping');
+  const [targetInput, setTargetInput] = useState(() =>
+    isNativeCapacitorOrigin() && (!getApiBaseUrl() || isAiStudioAuthGatedUrl(getApiBaseUrl()))
+      ? 'https://1.1.1.1/cdn-cgi/trace'
+      : '/api/ping'
+  );
   const [tcpPort, setTcpPort] = useState<number>(443);
   const [packetLimit, setPacketLimit] = useState<number>(10); // 0 = continuous
   const [intervalMs, setIntervalMs] = useState<number>(1000);

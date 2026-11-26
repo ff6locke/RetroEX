@@ -1,6 +1,6 @@
 const API_BASE_STORAGE_KEY = 'netpulse_api_base_url_v1';
 
-function normalizeBaseUrl(raw: string | undefined | null): string {
+export function normalizeBaseUrl(raw: string | undefined | null): string {
   if (!raw) return '';
   const trimmed = raw.trim().replace(/\/+$/, '');
   if (!trimmed || trimmed === 'MY_APP_URL') return '';
@@ -19,16 +19,49 @@ export function isNativeCapacitorOrigin(): boolean {
   );
 }
 
-export function getApiBaseUrl(): string {
+export function isAiStudioAuthGatedUrl(url: string | undefined | null): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    return /^ais-dev-/i.test(parsed.hostname) && parsed.hostname.endsWith('.run.app');
+  } catch {
+    return false;
+  }
+}
+
+export function getSavedApiBaseOverride(): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    return normalizeBaseUrl(localStorage.getItem(API_BASE_STORAGE_KEY));
+  } catch {
+    return '';
+  }
+}
+
+export function setSavedApiBaseOverride(url: string): string {
+  const normalized = normalizeBaseUrl(url);
   if (typeof window !== 'undefined') {
     try {
-      const override = normalizeBaseUrl(localStorage.getItem(API_BASE_STORAGE_KEY));
-      if (override) return override;
+      if (normalized) {
+        localStorage.setItem(API_BASE_STORAGE_KEY, normalized);
+      } else {
+        localStorage.removeItem(API_BASE_STORAGE_KEY);
+      }
     } catch {
       // Ignore storage errors
     }
   }
-  const envBase = normalizeBaseUrl(import.meta.env.VITE_API_BASE_URL as string | undefined);
+  return normalized;
+}
+
+export function getBakedApiBaseUrl(): string {
+  return normalizeBaseUrl(import.meta.env.VITE_API_BASE_URL as string | undefined);
+}
+
+export function getApiBaseUrl(): string {
+  const override = getSavedApiBaseOverride();
+  if (override) return override;
+  const envBase = getBakedApiBaseUrl();
   if (envBase) return envBase;
   return '';
 }

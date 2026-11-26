@@ -26,7 +26,14 @@ import type {
   TvTransferRoom,
 } from '../types/network';
 import { QrCodeSvg } from './QrCodeSvg';
-import { apiUrl, getPublicAppOrigin } from '../utils/apiUrl';
+import {
+  apiUrl,
+  getApiBaseUrl,
+  getPublicAppOrigin,
+  isAiStudioAuthGatedUrl,
+  isNativeCapacitorOrigin,
+  setSavedApiBaseOverride,
+} from '../utils/apiUrl';
 
 interface TvTransferPanelProps {
   initialRoomCode?: string;
@@ -76,6 +83,8 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
   const [roomLoading, setRoomLoading] = useState(true);
   const [roomError, setRoomError] = useState<string | null>(null);
   const [joinCodeInput, setJoinCodeInput] = useState(initialRoomCode || '');
+  const [serverUrlInput, setServerUrlInput] = useState(() => getApiBaseUrl());
+  const [needsServerConfig, setNeedsServerConfig] = useState(false);
 
   const [isDragging, setIsDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -115,6 +124,10 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
   const [compileTag, setCompileTag] = useState('v1.0.0');
   const [compileAppName, setCompileAppName] = useState('NetPulse TV');
   const [compileAppId, setCompileAppId] = useState('app.netpulse.tv');
+  const [compileServerUrl, setCompileServerUrl] = useState(() => {
+    const origin = getPublicAppOrigin();
+    return isAiStudioAuthGatedUrl(origin) ? '' : origin;
+  });
   const [syncSource, setSyncSource] = useState(true);
   const [compiling, setCompiling] = useState(false);
   const [compileError, setCompileError] = useState<string | null>(null);
@@ -169,6 +182,19 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
     }
   };
 
+  const formatRoomNetworkError = useCallback((err: unknown, fallback: string): string => {
+    const msg = err instanceof Error ? err.message : fallback;
+    const base = getApiBaseUrl();
+    if (/failed to fetch|networkerror|load failed/i.test(msg)) {
+      setNeedsServerConfig(true);
+      if (isNativeCapacitorOrigin() && (!base || isAiStudioAuthGatedUrl(base))) {
+        return 'Cannot reach the AI Studio dev URL from this standalone APK because AI Studio requires Google login cookies. Deploy the app to Cloud Run (or run NetPulse locally on your Wi-Fi) and enter that public server URL below.';
+      }
+      return `Unable to reach NetPulse server (${base || 'same origin'}). Check Wi-Fi or enter a reachable server URL below.`;
+    }
+    return msg;
+  }, []);
+
   const createRoom = useCallback(async () => {
     setRoomLoading(true);
     setRoomError(null);
@@ -182,14 +208,15 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
         setRoomError(data.error || 'Unable to create a TV transfer room.');
         return;
       }
+      setNeedsServerConfig(false);
       setRoom(data.room);
       setJoinCodeInput(data.room.code);
     } catch (err) {
-      setRoomError(err instanceof Error ? err.message : 'Network error creating room.');
+      setRoomError(formatRoomNetworkError(err, 'Network error creating room.'));
     } finally {
       setRoomLoading(false);
     }
-  }, []);
+  }, [formatRoomNetworkError]);
 
   const joinRoom = useCallback(
     async (code: string, fallbackToCreate = false) => {
@@ -215,15 +242,16 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
           setRoomError(data.error || `Room ${clean} not found or expired.`);
           return;
         }
+        setNeedsServerConfig(false);
         setRoom(data.room);
         setJoinCodeInput(data.room.code);
       } catch (err) {
-        setRoomError(err instanceof Error ? err.message : 'Unable to join transfer room.');
+        setRoomError(formatRoomNetworkError(err, 'Unable to join transfer room.'));
       } finally {
         setRoomLoading(false);
       }
     },
-    [createRoom]
+    [createRoom, formatRoomNetworkError]
   );
 
   // Initialize room on mount
@@ -580,7 +608,7 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
           appId: compileAppId.trim() || 'app.netpulse.tv',
           syncWorkflow: true,
           syncSource,
-          serverUrl: getPublicAppOrigin(),
+          serverUrl: compileServerUrl.trim(),
         }),
       });
       const data = await readJsonSafe<{
@@ -679,6 +707,55 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
         }
         setReleases(data.releases || []);
       } catch (err) {
+        // Fallback directly to public GitHub API when running inside standalone APK without NetPulse backend
+        try {
+          const publicRes = await fetch(
+            `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases?per_page=15`,
+            { headers: { Accept: 'application/vnd.github+json' } }
+          );
+          if (publicRes.ok) {
+            const raw = (await publicRes.json()) as Array<{
+              id: number;
+              tag_name: string;
+              name: string | null;
+              prerelease: boolean;
+              draft: boolean;
+              published_at: string | null;
+              html_url: string;
+              assets: Array<{
+                id: number;
+                name: string;
+                size: number;
+                content_type: string;
+                download_count: number;
+                browser_download_url: string;
+              }>;
+            }>;
+            setReleases(
+              raw.map((r) => ({
+                id: r.id,
+                tagName: r.tag_name,
+                name: r.name || r.tag_name,
+                prerelease: r.prerelease,
+                draft: r.draft,
+                publishedAt: r.published_at,
+                htmlUrl: r.html_url,
+                assets: (r.assets || []).map((a) => ({
+                  id: a.id,
+                  name: a.name,
+                  size: a.size,
+                  contentType: a.content_type,
+                  downloadCount: a.download_count,
+                  browserDownloadUrl: a.browser_download_url,
+                  isApk: /\.(apk|xapk|apks)$/i.test(a.name),
+                })),
+              }))
+            );
+            return;
+          }
+        } catch {
+          // Ignore fallback failure and surface original error
+        }
         setReleasesError(err instanceof Error ? err.message : 'GitHub lookup failed.');
       } finally {
         setReleasesLoading(false);
@@ -842,8 +919,47 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
         </div>
 
         {roomError && (
-          <div className="p-3.5 border border-red-200 bg-red-50/70 rounded-md text-sm text-red-800">
-            {roomError}
+          <div className="p-3.5 border border-red-200 bg-red-50/70 rounded-md text-sm text-red-800 space-y-3">
+            <div>{roomError}</div>
+            {(needsServerConfig || isNativeCapacitorOrigin()) && (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const saved = setSavedApiBaseOverride(serverUrlInput);
+                  setServerUrlInput(saved);
+                  void createRoom();
+                  void refreshGithubStatusAndRepos();
+                }}
+                className="flex flex-col sm:flex-row sm:items-center gap-2 pt-2 border-t border-red-200/80"
+              >
+                <input
+                  type="url"
+                  value={serverUrlInput}
+                  onChange={(e) => setServerUrlInput(e.target.value)}
+                  placeholder="https://your-deployed-app.run.app or http://192.168.1.10:3000"
+                  aria-label="NetPulse backend server URL"
+                  className="flex-1 h-9 px-3 text-xs font-mono bg-white border border-red-300 rounded-md text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600/20 focus:border-blue-600"
+                />
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="submit"
+                    className="h-9 px-3.5 text-xs font-medium text-white bg-slate-900 rounded-md hover:bg-slate-800 whitespace-nowrap"
+                  >
+                    Save &amp; Connect
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSavedApiBaseOverride('');
+                      setServerUrlInput('');
+                    }}
+                    className="h-9 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 whitespace-nowrap"
+                  >
+                    Reset
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         )}
 
@@ -1411,6 +1527,23 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
                   placeholder="app.netpulse.tv"
                   className="w-full h-10 px-3 text-sm font-mono bg-white border border-slate-200 rounded-md text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600/20 focus:border-blue-600"
                 />
+              </div>
+
+              <div className="md:col-span-12">
+                <label htmlFor="comp-server-url" className="block text-xs font-medium text-slate-600 mb-1.5">
+                  APK Backend Server URL (optional — for TV Transfer rooms inside the APK)
+                </label>
+                <input
+                  id="comp-server-url"
+                  type="url"
+                  value={compileServerUrl}
+                  onChange={(e) => setCompileServerUrl(e.target.value)}
+                  placeholder="https://your-deployed-cloud-run-app.run.app or http://192.168.1.10:3000"
+                  className="w-full h-10 px-3 text-sm font-mono bg-white border border-slate-200 rounded-md text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600/20 focus:border-blue-600"
+                />
+                <p className="mt-1 text-[11px] text-slate-500">
+                  Leave blank to run network diagnostics standalone inside the APK or enter a public deployed URL / local LAN server IP (private <span className="font-mono">ais-dev</span> preview URLs require Google sign-in cookies and cannot be fetched directly by installed APKs).
+                </p>
               </div>
 
               <div className="md:col-span-12 flex flex-wrap items-center justify-between gap-3 pt-1">

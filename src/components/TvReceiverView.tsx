@@ -2,7 +2,14 @@ import { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, Download, FileBox, Film, Package, RefreshCw, Tv } from 'lucide-react';
 import type { TvTransferFileItem, TvTransferRoom } from '../types/network';
 import { QrCodeSvg } from './QrCodeSvg';
-import { apiUrl, getPublicAppOrigin } from '../utils/apiUrl';
+import {
+  apiUrl,
+  getApiBaseUrl,
+  getPublicAppOrigin,
+  isAiStudioAuthGatedUrl,
+  isNativeCapacitorOrigin,
+  setSavedApiBaseOverride,
+} from '../utils/apiUrl';
 
 interface TvReceiverViewProps {
   initialCode?: string;
@@ -46,6 +53,23 @@ export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProp
   const [error, setError] = useState<string | null>(null);
   const [liveConnected, setLiveConnected] = useState(false);
 
+  const [serverUrlInput, setServerUrlInput] = useState(() => getApiBaseUrl());
+  const [needsServerConfig, setNeedsServerConfig] = useState(false);
+
+  const formatRoomError = useCallback((err: unknown, fallback: string): string => {
+    const msg = err instanceof Error ? err.message : fallback;
+    const base = getApiBaseUrl();
+    if (/failed to fetch|networkerror|load failed/i.test(msg)) {
+      if (isNativeCapacitorOrigin() && (!base || isAiStudioAuthGatedUrl(base))) {
+        setNeedsServerConfig(true);
+        return 'Cannot connect from APK: the AI Studio dev URL requires Google login cookies. Enter your deployed public NetPulse URL or local LAN server (e.g. http://192.168.1.10:3000) below.';
+      }
+      setNeedsServerConfig(true);
+      return `Unable to reach NetPulse server (${base || 'same origin'}). Check Wi-Fi or enter your server URL below.`;
+    }
+    return msg;
+  }, []);
+
   const createNewRoom = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -56,14 +80,15 @@ export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProp
         setError(data.error || 'Unable to start a TV receiver session.');
         return;
       }
+      setNeedsServerConfig(false);
       setRoom(data.room);
       setJoinInput(data.room.code);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Network error starting TV room.');
+      setError(formatRoomError(err, 'Network error starting TV room.'));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [formatRoomError]);
 
   const joinRoomByCode = useCallback(
     async (code: string, fallbackToCreate = false) => {
@@ -86,15 +111,16 @@ export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProp
           setError(data.error || `Room ${clean} was not found or expired.`);
           return;
         }
+        setNeedsServerConfig(false);
         setRoom(data.room);
         setJoinInput(data.room.code);
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Unable to connect to room.');
+        setError(formatRoomError(err, 'Unable to connect to room.'));
       } finally {
         setLoading(false);
       }
     },
-    [createNewRoom]
+    [createNewRoom, formatRoomError]
   );
 
   useEffect(() => {
@@ -247,6 +273,38 @@ export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProp
             </div>
             {error && <p className="text-xs font-medium text-red-400">{error}</p>}
           </form>
+
+          {(needsServerConfig || isNativeCapacitorOrigin()) && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                const saved = setSavedApiBaseOverride(serverUrlInput);
+                setServerUrlInput(saved);
+                void createNewRoom();
+              }}
+              className="pt-4 border-t border-slate-800 space-y-2.5"
+            >
+              <label htmlFor="tv-server-url" className="block text-xs font-medium text-slate-300">
+                NetPulse Server URL (for APK / LAN / Deployed Cloud Run)
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  id="tv-server-url"
+                  type="url"
+                  value={serverUrlInput}
+                  onChange={(e) => setServerUrlInput(e.target.value)}
+                  placeholder="https://your-app.run.app or http://192.168.1.x:3000"
+                  className="flex-1 h-10 px-3 text-xs font-mono bg-slate-950 border border-slate-700 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-400"
+                />
+                <button
+                  type="submit"
+                  className="h-10 px-3.5 text-xs font-semibold bg-slate-800 text-white border border-slate-700 rounded-md hover:bg-slate-700 whitespace-nowrap"
+                >
+                  Save &amp; Retry
+                </button>
+              </div>
+            </form>
+          )}
         </section>
 
         {/* Right: Incoming Files Queue */}

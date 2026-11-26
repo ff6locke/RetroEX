@@ -8,7 +8,7 @@ import {
   measureServerTcpPing,
   normalizeBrowserProbeUrl,
 } from '../utils/networkProbes';
-import { apiUrl } from '../utils/apiUrl';
+import { apiUrl, getApiBaseUrl, isAiStudioAuthGatedUrl, isNativeCapacitorOrigin } from '../utils/apiUrl';
 
 type CheckStatus = 'pending' | 'running' | 'pass' | 'warn' | 'fail';
 
@@ -192,15 +192,22 @@ export function NetworkDiagnostics({ networkCtx, onOpenLivePing }: NetworkDiagno
       if (controller.signal.aborted) return;
 
       // Stage 2: 6-Probe Edge Burst
+      const useCloudflareEdge =
+        isNativeCapacitorOrigin() && (!getApiBaseUrl() || isAiStudioAuthGatedUrl(getApiBaseUrl()));
+      const burstTarget = useCloudflareEdge ? 'https://1.1.1.1/cdn-cgi/trace' : '/api/ping';
+      const burstLabel = useCloudflareEdge
+        ? 'Cloudflare Edge (1.1.1.1)'
+        : 'Current Server (/api/ping)';
+
       updateStage('edge-burst', {
         status: 'running',
-        summary: 'Sending 6 sequential probes to /api/ping...',
+        summary: `Sending 6 sequential probes to ${burstTarget}...`,
       });
       const burstSamples: PingSample[] = [];
       for (let seq = 1; seq <= 6; seq++) {
         const sample = await measureBrowserPing(
-          '/api/ping',
-          'Current Server (/api/ping)',
+          burstTarget,
+          burstLabel,
           seq,
           3000,
           controller.signal
@@ -438,12 +445,20 @@ export function NetworkDiagnostics({ networkCtx, onOpenLivePing }: NetworkDiagno
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ host: cleanHost }),
-        }).then((r) => r.json() as Promise<DnsLookupResult>),
+        })
+          .then((r) => r.json() as Promise<DnsLookupResult>)
+          .catch(
+            (): DnsLookupResult => ({
+              ok: false,
+              host: cleanHost,
+              error: 'NetPulse cloud server unreachable from standalone APK (connect server in TV Transfer tab).',
+            })
+          ),
       ]);
 
       let serverTcpSample: PingSample | null = null;
       if (dnsRes.ok) {
-        serverTcpSample = await measureServerTcpPing(dnsRes.host, 443, 1);
+        serverTcpSample = await measureServerTcpPing(dnsRes.host, 443, 1).catch(() => null);
       }
 
       const browserOk = browserSample.status === 'ok';
