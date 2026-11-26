@@ -252,7 +252,7 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
   const refreshGithubStatusAndRepos = useCallback(
     async (explicitSessionId?: string | null) => {
       const headers: Record<string, string> = { 'X-Requested-With': 'NetPulse' };
-      const sid = explicitSessionId ?? ghSessionId;
+      const sid = explicitSessionId !== undefined ? explicitSessionId : ghSessionId;
       if (sid) headers.Authorization = `Bearer ${sid}`;
 
       try {
@@ -264,7 +264,7 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
           setGhReposLoading(true);
           try {
             const reposRes = await fetch(apiUrl('/api/github/repos'), { cache: 'no-store', headers });
-            const reposData = await readJsonSafe<{ ok: boolean; repos?: GithubRepoEntry[] }>(
+            const reposData = await readJsonSafe<{ ok: boolean; error?: string; repos?: GithubRepoEntry[] }>(
               reposRes,
               'GitHub repos'
             );
@@ -276,6 +276,8 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
                 setGhRepo(list[0].name);
                 setGhBranch(list[0].defaultBranch || 'main');
               }
+            } else if (!reposRes.ok) {
+              setGhAuthError(reposData.error || `Failed to load repositories (HTTP ${reposRes.status}).`);
             }
           } finally {
             setGhReposLoading(false);
@@ -283,8 +285,9 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
         } else {
           setGhRepos([]);
         }
-      } catch {
+      } catch (err) {
         setGhStatus({ ok: false, configured: false });
+        setGhAuthError(err instanceof Error ? err.message : 'Unable to reach GitHub status API.');
       }
     },
     [ghSessionId, ghOwner, ghRepo]
@@ -468,25 +471,30 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
   };
 
   const fetchWorkflowRuns = useCallback(
-    async (ownerArg?: string, repoArg?: string) => {
+    async (ownerArg?: string, repoArg?: string, showErrors = false) => {
       const owner = (ownerArg ?? ghOwner).trim();
       const repo = (repoArg ?? ghRepo).trim();
       if (!owner || !repo) return;
       setRunsLoading(true);
+      if (showErrors) setCompileError(null);
       try {
         const res = await fetch(
           apiUrl(`/api/github/workflow-runs?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}`),
           { cache: 'no-store', headers: buildGithubAuthHeaders() }
         );
-        const data = await readJsonSafe<{ ok: boolean; runs?: GithubWorkflowRun[] }>(
+        const data = await readJsonSafe<{ ok: boolean; error?: string; runs?: GithubWorkflowRun[] }>(
           res,
           'Workflow runs'
         );
         if (res.ok && data.ok) {
           setWorkflowRuns(data.runs || []);
+        } else if (showErrors) {
+          setCompileError(data.error || `Could not check workflow runs (HTTP ${res.status}).`);
         }
-      } catch {
-        // Ignore transient polling failure
+      } catch (err) {
+        if (showErrors) {
+          setCompileError(err instanceof Error ? err.message : 'Unable to query GitHub Actions runs.');
+        }
       } finally {
         setRunsLoading(false);
       }
@@ -1410,7 +1418,7 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
                   <button
                     type="button"
                     disabled={runsLoading || !ghOwner.trim() || !ghRepo.trim()}
-                    onClick={() => void fetchWorkflowRuns()}
+                    onClick={() => void fetchWorkflowRuns(undefined, undefined, true)}
                     className="inline-flex items-center gap-1.5 h-10 px-3.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-md hover:bg-slate-50 disabled:opacity-50 transition-colors whitespace-nowrap"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${runsLoading ? 'animate-spin' : ''}`} />
