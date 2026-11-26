@@ -55,6 +55,22 @@ function classifyTransferFile(name: string): string {
   return 'Document';
 }
 
+async function readJsonSafe<T = Record<string, unknown>>(
+  res: Response,
+  endpointLabel: string
+): Promise<T> {
+  const text = await res.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    const titleMatch = text.match(/<title>([^<]+)<\/title>/i);
+    const hint = titleMatch?.[1]?.trim() || text.replace(/\s+/g, ' ').slice(0, 100);
+    throw new Error(
+      `${endpointLabel} returned non-JSON response (HTTP ${res.status}): ${hint || 'Empty response'}`
+    );
+  }
+}
+
 export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransferPanelProps) {
   const [room, setRoom] = useState<TvTransferRoom | null>(null);
   const [roomLoading, setRoomLoading] = useState(true);
@@ -158,8 +174,11 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
     setRoomError(null);
     try {
       const res = await fetch(apiUrl('/api/tv/rooms'), { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok || !data.ok) {
+      const data = await readJsonSafe<{ ok: boolean; error?: string; room?: TvTransferRoom }>(
+        res,
+        'Create TV room'
+      );
+      if (!res.ok || !data.ok || !data.room) {
         setRoomError(data.error || 'Unable to create a TV transfer room.');
         return;
       }
@@ -184,8 +203,11 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
       setRoomError(null);
       try {
         const res = await fetch(apiUrl(`/api/tv/rooms/${clean}`), { cache: 'no-store' });
-        const data = await res.json();
-        if (!res.ok || !data.ok) {
+        const data = await readJsonSafe<{ ok: boolean; error?: string; room?: TvTransferRoom }>(
+          res,
+          'Join TV room'
+        );
+        if (!res.ok || !data.ok || !data.room) {
           if (fallbackToCreate) {
             await createRoom();
             return;
@@ -235,14 +257,17 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
 
       try {
         const res = await fetch(apiUrl('/api/github/status'), { cache: 'no-store', headers });
-        const statusData = (await res.json()) as GithubStatusResponse;
+        const statusData = await readJsonSafe<GithubStatusResponse>(res, 'GitHub status');
         setGhStatus(statusData);
 
         if (statusData.configured && statusData.tokenValid) {
           setGhReposLoading(true);
           try {
             const reposRes = await fetch(apiUrl('/api/github/repos'), { cache: 'no-store', headers });
-            const reposData = await reposRes.json();
+            const reposData = await readJsonSafe<{ ok: boolean; repos?: GithubRepoEntry[] }>(
+              reposRes,
+              'GitHub repos'
+            );
             if (reposRes.ok && reposData.ok && Array.isArray(reposData.repos)) {
               const list = reposData.repos as GithubRepoEntry[];
               setGhRepos(list);
@@ -399,7 +424,10 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
     setGhAuthError(null);
     try {
       const res = await fetch(apiUrl('/api/auth/github/url'), { cache: 'no-store' });
-      const data = await res.json();
+      const data = await readJsonSafe<{ ok: boolean; url?: string; error?: string }>(
+        res,
+        'GitHub OAuth URL'
+      );
       if (!res.ok || !data.ok || !data.url) {
         setGhAuthError(
           data.error ||
@@ -450,7 +478,10 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
           apiUrl(`/api/github/workflow-runs?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}`),
           { cache: 'no-store', headers: buildGithubAuthHeaders() }
         );
-        const data = await res.json();
+        const data = await readJsonSafe<{ ok: boolean; runs?: GithubWorkflowRun[] }>(
+          res,
+          'Workflow runs'
+        );
         if (res.ok && data.ok) {
           setWorkflowRuns(data.runs || []);
         }
@@ -493,7 +524,10 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
           isPrivate: newRepoPrivate,
         }),
       });
-      const data = await res.json();
+      const data = await readJsonSafe<{ ok: boolean; error?: string; repo?: GithubRepoEntry }>(
+        res,
+        'Create GitHub repo'
+      );
       if (!res.ok || !data.ok || !data.repo) {
         setCreateRepoError(data.error || 'Could not create repository.');
         return;
@@ -541,14 +575,23 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
           serverUrl: getPublicAppOrigin(),
         }),
       });
-      const data = await res.json();
+      const data = await readJsonSafe<{
+        ok: boolean;
+        error?: string;
+        message?: string;
+        actionsUrl?: string;
+      }>(res, 'Compile APK on GitHub');
       if (!res.ok || !data.ok) {
+        if (res.status === 401) {
+          setGhSessionId(null);
+          void refreshGithubStatusAndRepos(null);
+        }
         setCompileError(data.error || 'Failed to trigger GitHub Actions APK build.');
         return;
       }
       setCompileMessage({
-        text: data.message,
-        actionsUrl: data.actionsUrl,
+        text: data.message || 'Started GitHub Actions APK compilation.',
+        actionsUrl: data.actionsUrl || `https://github.com/${owner}/${repo}/actions`,
       });
       window.setTimeout(() => {
         void fetchWorkflowRuns(owner, repo);
@@ -577,7 +620,12 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
           runId,
         }),
       });
-      const data = await res.json();
+      const data = await readJsonSafe<{
+        ok: boolean;
+        error?: string;
+        room?: TvTransferRoom;
+        fileName?: string;
+      }>(res, 'Import APK artifact');
       if (!res.ok || !data.ok) {
         setCompileError(data.error || 'Could not import compiled APK from GitHub Actions.');
         return;
@@ -612,7 +660,11 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
           apiUrl(`/api/github/releases?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}`),
           { cache: 'no-store', headers: buildGithubAuthHeaders() }
         );
-        const data = await res.json();
+        const data = await readJsonSafe<{
+          ok: boolean;
+          error?: string;
+          releases?: GithubReleaseEntry[];
+        }>(res, 'Load GitHub releases');
         if (!res.ok || !data.ok) {
           setReleasesError(data.error || 'Failed to fetch GitHub releases.');
           return;
@@ -649,7 +701,10 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
           assetId: asset.id,
         }),
       });
-      const data = await res.json();
+      const data = await readJsonSafe<{ ok: boolean; error?: string; room?: TvTransferRoom }>(
+        res,
+        'Import release asset'
+      );
       if (!res.ok || !data.ok) {
         setReleasesError(data.error || 'Unable to queue asset to TV room.');
         return;
@@ -702,14 +757,21 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
         headers: buildGithubAuthHeaders(),
         body: formData,
       });
-      const data = await res.json();
-      if (!res.ok || !data.ok) {
+      const data = await readJsonSafe<{
+        ok: boolean;
+        error?: string;
+        releaseUrl?: string;
+        tagName?: string;
+        asset?: { name: string; size: number; downloadUrl: string };
+        room?: TvTransferRoom;
+      }>(res, 'Publish APK release');
+      if (!res.ok || !data.ok || !data.asset) {
         setPublishError(data.error || 'Failed to publish APK release.');
         return;
       }
       setPublishResult({
-        releaseUrl: data.releaseUrl,
-        tagName: data.tagName,
+        releaseUrl: data.releaseUrl || '',
+        tagName: data.tagName || pubTag.trim(),
         assetName: data.asset.name,
         assetSize: data.asset.size,
         downloadUrl: data.asset.downloadUrl,
