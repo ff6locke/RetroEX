@@ -1,16 +1,15 @@
-import { useCallback, useEffect, useState } from 'react';
-import { ArrowLeft, Download, FileBox, Film, Package, RefreshCw, Tv } from 'lucide-react';
-import type { TvTransferFileItem, TvTransferRoom } from '../types/network';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ArrowLeft, Download, FileBox, Film, Package, RefreshCw, Tv, Wifi } from 'lucide-react';
 import { QrCodeSvg } from './QrCodeSvg';
+import { getPublicAppOrigin, isAiStudioAuthGatedUrl, isNativeCapacitorOrigin } from '../utils/apiUrl';
 import {
-  apiUrl,
-  getApiBaseUrl,
-  getPublicAppOrigin,
-  hasReachableBackendConfig,
-  isAiStudioAuthGatedUrl,
-  isNativeCapacitorOrigin,
-  setSavedApiBaseOverride,
-} from '../utils/apiUrl';
+  generateRoomCode,
+  P2pTransferSession,
+  saveOrShareReceivedFile,
+  type P2pConnectionState,
+  type P2pIncomingFile,
+  type P2pIncomingProgress,
+} from '../utils/p2pTransfer';
 
 interface TvReceiverViewProps {
   initialCode?: string;
@@ -24,8 +23,8 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-function fileCategoryLabel(file: TvTransferFileItem): string {
-  const lower = file.name.toLowerCase();
+function fileCategoryLabel(name: string): string {
+  const lower = name.toLowerCase();
   if (lower.endsWith('.apk') || lower.endsWith('.xapk') || lower.endsWith('.apks')) {
     return 'Android APK';
   }
@@ -47,166 +46,81 @@ function FileIcon({ name }: { name: string }) {
   return <FileBox className="w-6 h-6 text-slate-300 shrink-0" />;
 }
 
-async function readJsonSafe<T = Record<string, unknown>>(
-  res: Response,
-  endpointLabel: string
-): Promise<T> {
-  const text = await res.text();
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    const titleMatch = text.match(/<title>([^<]+)<\/title>/i);
-    const hint = titleMatch?.[1]?.trim() || text.replace(/\s+/g, ' ').slice(0, 100);
-    throw new Error(
-      `${endpointLabel} returned non-JSON response (HTTP ${res.status}): ${hint || 'Empty response'}`
-    );
-  }
-}
-
 export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProps) {
-  const [room, setRoom] = useState<TvTransferRoom | null>(null);
-  const [joinInput, setJoinInput] = useState(initialCode || '');
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [liveConnected, setLiveConnected] = useState(false);
-
-  const [serverUrlInput, setServerUrlInput] = useState(() => getApiBaseUrl());
-  const [needsServerConfig, setNeedsServerConfig] = useState(false);
-
-  const formatRoomError = useCallback((err: unknown, fallback: string): string => {
-    const msg = err instanceof Error ? err.message : fallback;
-    const base = getApiBaseUrl();
-    if (/failed to fetch|networkerror|load failed|returned non-json response/i.test(msg)) {
-      setNeedsServerConfig(true);
-      if (isNativeCapacitorOrigin() && (!base || isAiStudioAuthGatedUrl(base))) {
-        return 'Standalone APK mode: connect a deployed Cloud Run URL or local LAN NetPulse server (e.g. http://192.168.1.10:3000) below to pair TV Transfer rooms.';
-      }
-      return `Unable to reach NetPulse server (${base || 'same origin'}). Check Wi-Fi or enter your server URL below.`;
-    }
-    return msg;
-  }, []);
-
-  const createNewRoom = useCallback(async (force = false) => {
-    if (!force && !hasReachableBackendConfig()) {
-      setLoading(false);
-      setError(null);
-      setNeedsServerConfig(true);
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(apiUrl('/api/tv/rooms'), { method: 'POST' });
-      const data = await readJsonSafe<{ ok: boolean; error?: string; room?: TvTransferRoom }>(
-        res,
-        'Create TV room'
-      );
-      if (!res.ok || !data.ok || !data.room) {
-        setError(data.error || 'Unable to start a TV receiver session.');
-        return;
-      }
-      setNeedsServerConfig(false);
-      setRoom(data.room);
-      setJoinInput(data.room.code);
-    } catch (err) {
-      setError(formatRoomError(err, 'Network error starting TV room.'));
-    } finally {
-      setLoading(false);
-    }
-  }, [formatRoomError]);
-
-  const joinRoomByCode = useCallback(
-    async (code: string, fallbackToCreate = false) => {
-      if (!hasReachableBackendConfig()) {
-        setLoading(false);
-        setNeedsServerConfig(true);
-        setError(
-          fallbackToCreate
-            ? null
-            : 'Enter your deployed Cloud Run or local LAN NetPulse Server URL below before pairing.'
-        );
-        return;
-      }
-      const clean = code.replace(/\D/g, '').slice(0, 6);
-      if (clean.length !== 6) {
-        setError('Enter a valid 6-digit pairing code.');
-        setLoading(false);
-        return;
-      }
-      setLoading(true);
-      setError(null);
-      try {
-        const res = await fetch(apiUrl(`/api/tv/rooms/${clean}`), { cache: 'no-store' });
-        const data = await readJsonSafe<{ ok: boolean; error?: string; room?: TvTransferRoom }>(
-          res,
-          'Join TV room'
-        );
-        if (!res.ok || !data.ok || !data.room) {
-          if (fallbackToCreate) {
-            await createNewRoom(true);
-            return;
-          }
-          setError(data.error || `Room ${clean} was not found or expired.`);
-          return;
-        }
-        setNeedsServerConfig(false);
-        setRoom(data.room);
-        setJoinInput(data.room.code);
-      } catch (err) {
-        setError(formatRoomError(err, 'Unable to connect to room.'));
-      } finally {
-        setLoading(false);
-      }
-    },
-    [createNewRoom, formatRoomError]
+  const [roomCode, setRoomCode] = useState<string>(() =>
+    initialCode && /^\d{6}$/.test(initialCode) ? initialCode : generateRoomCode()
   );
+  const [joinInput, setJoinInput] = useState(() =>
+    initialCode && /^\d{6}$/.test(initialCode) ? initialCode : ''
+  );
+  const [connState, setConnState] = useState<P2pConnectionState>('initializing');
+  const [connDetail, setConnDetail] = useState<string>('Starting direct pairing...');
+  const [incomingProgress, setIncomingProgress] = useState<P2pIncomingProgress | null>(null);
+  const [receivedFiles, setReceivedFiles] = useState<P2pIncomingFile[]>([]);
+  const [joinError, setJoinError] = useState<string | null>(null);
+
+  const receivedFilesRef = useRef<P2pIncomingFile[]>([]);
+  receivedFilesRef.current = receivedFiles;
 
   useEffect(() => {
-    if (initialCode && /^\d{6}$/.test(initialCode)) {
-      void joinRoomByCode(initialCode, true);
-    } else {
-      void createNewRoom();
-    }
-  }, [initialCode, joinRoomByCode, createNewRoom]);
-
-  // Live SSE subscription for incoming files
-  useEffect(() => {
-    if (!room?.code) return;
-    const source = new EventSource(apiUrl(`/api/tv/rooms/${room.code}/events`));
-
-    source.addEventListener('open', () => {
-      setLiveConnected(true);
-    });
-
-    source.addEventListener('room', (evt) => {
-      try {
-        const parsed = JSON.parse((evt as MessageEvent).data) as TvTransferRoom;
-        setRoom(parsed);
-        setLiveConnected(true);
-      } catch {
-        // Ignore malformed frame
-      }
-    });
-
-    source.addEventListener('error', () => {
-      setLiveConnected(false);
+    const session = new P2pTransferSession(roomCode, {
+      onStateChange: (state, detail) => {
+        setConnState(state);
+        if (detail) setConnDetail(detail);
+      },
+      onOutgoingUpdate: () => {
+        // Receiver view focuses on incoming files
+      },
+      onIncomingProgress: (progress) => {
+        setIncomingProgress(progress);
+      },
+      onFileReceived: (file) => {
+        setReceivedFiles((prev) => [file, ...prev]);
+      },
     });
 
     return () => {
-      source.close();
-      setLiveConnected(false);
+      session.destroy();
     };
-  }, [room?.code]);
+  }, [roomCode]);
 
-  const senderUrl =
-    typeof window !== 'undefined' && room
-      ? `${getPublicAppOrigin()}/?nav=tv-transfer&room=${room.code}`
-      : '';
+  useEffect(() => {
+    return () => {
+      for (const f of receivedFilesRef.current) {
+        URL.revokeObjectURL(f.blobUrl);
+      }
+    };
+  }, []);
+
+  const handleNewCode = useCallback(() => {
+    setJoinError(null);
+    const next = generateRoomCode();
+    setRoomCode(next);
+    setJoinInput('');
+  }, []);
 
   const handleJoinSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    void joinRoomByCode(joinInput, false);
+    const clean = joinInput.replace(/\D/g, '').slice(0, 6);
+    if (clean.length !== 6) {
+      setJoinError('Enter a valid 6-digit pairing code.');
+      return;
+    }
+    setJoinError(null);
+    setRoomCode(clean);
   };
+
+  const publicOrigin = getPublicAppOrigin();
+  const canShowWebQr =
+    !isNativeCapacitorOrigin() &&
+    Boolean(publicOrigin) &&
+    !isAiStudioAuthGatedUrl(publicOrigin);
+  const senderUrl = canShowWebQr ? `${publicOrigin}/?nav=tv-transfer&room=${roomCode}` : '';
+
+  const incomingPct =
+    incomingProgress && incomingProgress.size > 0
+      ? Math.min(100, Math.round((incomingProgress.receivedBytes / incomingProgress.size) * 100))
+      : 0;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-50 flex flex-col">
@@ -215,15 +129,30 @@ export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProp
           <div className="flex items-center gap-3">
             <Tv className="w-6 h-6 text-blue-400 shrink-0" />
             <span className="text-xl font-bold tracking-tight whitespace-nowrap">
-              NetPulse TV Receiver
+              NetPulse Direct Receiver
             </span>
           </div>
 
           <div className="flex items-center gap-4 text-sm text-slate-300">
-            <span>{liveConnected ? 'Live Sync Active' : 'Standby'}</span>
+            <span className="inline-flex items-center gap-2">
+              <Wifi
+                className={`w-4 h-4 ${
+                  connState === 'connected'
+                    ? 'text-emerald-400'
+                    : connState === 'error'
+                      ? 'text-red-400'
+                      : 'text-blue-400'
+                }`}
+              />
+              {connState === 'connected'
+                ? 'Direct P2P Connected'
+                : connState === 'pairing'
+                  ? 'Pairing...'
+                  : 'Ready (No Server Needed)'}
+            </span>
             <button
               type="button"
-              onClick={() => onExitTvMode(room?.code)}
+              onClick={() => onExitTvMode(roomCode)}
               className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-medium text-slate-950 bg-slate-100 rounded-md hover:bg-white focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-blue-400 transition-colors whitespace-nowrap shrink-0"
             >
               <ArrowLeft className="w-4 h-4" />
@@ -234,65 +163,46 @@ export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProp
       </header>
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-6 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-        {/* Left: Pairing Code & QR */}
+        {/* Left: Pairing Code */}
         <section className="lg:col-span-5 bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-6">
           <div>
             <h1 className="text-xl font-semibold text-white">Pair Phone or Computer</h1>
             <p className="mt-1.5 text-sm text-slate-300">
-              Scan this QR code from your phone or open NetPulse on your computer and enter the
-              6-digit pairing code to push APKs and media files directly to this TV.
+              Open NetPulse on your phone or computer under <strong>File Send</strong> and enter
+              this 6-digit code. Files transfer directly device-to-device with no local server.
             </p>
           </div>
 
-          {room ? (
-            <div className="space-y-6">
-              <div className="bg-slate-950 border border-slate-800 rounded-lg p-5 text-center">
-                <div className="text-xs font-medium text-slate-400">TV Pairing Code</div>
-                <div className="mt-2 text-5xl font-mono font-bold tracking-[0.2em] text-white tabular-nums">
-                  {room.code}
-                </div>
-                <div className="mt-2 text-xs text-slate-400 font-mono tabular-nums">
-                  Expires {new Date(room.expiresAt).toLocaleTimeString()}
-                </div>
+          <div className="space-y-4">
+            <div className="bg-slate-950 border border-slate-800 rounded-lg p-6 text-center">
+              <div className="text-xs font-medium text-slate-400">6-Digit Pairing Code</div>
+              <div className="mt-2 text-5xl font-mono font-bold tracking-[0.2em] text-white tabular-nums">
+                {roomCode}
               </div>
+              <div className="mt-3 text-xs text-slate-300">{connDetail}</div>
+            </div>
 
+            {canShowWebQr && senderUrl && (
               <div className="flex flex-col sm:flex-row items-center gap-5 bg-slate-950 border border-slate-800 rounded-lg p-5">
                 <div className="p-2 bg-white rounded-lg shrink-0">
-                  <QrCodeSvg value={senderUrl} size={156} label={`Send files to room ${room.code}`} />
+                  <QrCodeSvg value={senderUrl} size={140} label={`Send files to code ${roomCode}`} />
                 </div>
                 <div className="min-w-0 space-y-2 text-sm">
                   <div className="font-semibold text-white">Scan to Send Files</div>
                   <p className="text-xs text-slate-300 leading-relaxed">
-                    Opens the upload &amp; GitHub APK sender linked straight to room{' '}
-                    <span className="font-mono text-white">{room.code}</span>.
+                    Opens NetPulse File Send linked directly to code{' '}
+                    <span className="font-mono text-white">{roomCode}</span>.
                   </p>
                   <div className="text-xs font-mono text-blue-300 break-all">{senderUrl}</div>
                 </div>
               </div>
-            </div>
-          ) : (
-            <div className="py-8 px-4 bg-slate-950 border border-slate-800 rounded-lg text-center space-y-2">
-              <div className="text-sm font-medium text-slate-200">
-                {loading
-                  ? 'Preparing TV pairing code...'
-                  : needsServerConfig
-                    ? 'NetPulse Server Not Connected'
-                    : 'No active TV room.'}
-              </div>
-              {!loading && needsServerConfig && (
-                <p className="text-xs text-slate-400 leading-relaxed max-w-sm mx-auto">
-                  This standalone APK runs network diagnostics directly on your TV. To receive
-                  wireless file transfers from your phone, enter your deployed Cloud Run URL or
-                  local Wi-Fi NetPulse server URL below.
-                </p>
-              )}
-            </div>
-          )}
+            )}
+          </div>
 
           {/* Join existing code or generate new code */}
           <form onSubmit={handleJoinSubmit} className="pt-4 border-t border-slate-800 space-y-3">
             <label htmlFor="tv-join-code" className="block text-xs font-medium text-slate-300">
-              Already started a room on your phone? Enter 6-digit code:
+              Already started on your phone? Enter its 6-digit code:
             </label>
             <div className="flex items-center gap-2">
               <input
@@ -307,91 +217,72 @@ export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProp
               />
               <button
                 type="submit"
-                disabled={loading}
                 className="h-11 px-4 text-sm font-semibold bg-blue-600 text-white rounded-md hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-blue-400 whitespace-nowrap"
               >
                 Pair
               </button>
               <button
                 type="button"
-                onClick={() => void createNewRoom()}
-                disabled={loading}
+                onClick={handleNewCode}
                 title="Generate new pairing code"
                 className="h-11 px-3.5 text-sm font-medium bg-slate-800 text-slate-100 border border-slate-700 rounded-md hover:bg-slate-700 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-blue-400 whitespace-nowrap"
               >
                 <RefreshCw className="w-4 h-4" />
               </button>
             </div>
-            {error && <p className="text-xs font-medium text-red-400">{error}</p>}
+            {joinError && <p className="text-xs font-medium text-red-400">{joinError}</p>}
           </form>
-
-          {(needsServerConfig || isNativeCapacitorOrigin()) && (
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                const saved = setSavedApiBaseOverride(serverUrlInput);
-                setServerUrlInput(saved);
-                if (!saved || !hasReachableBackendConfig()) {
-                  setError(
-                    'Enter a valid public https:// Cloud Run URL or local LAN http://192.168.x.x:3000 server URL (ais-dev preview URLs cannot be accessed from an APK).'
-                  );
-                  return;
-                }
-                void createNewRoom(true);
-              }}
-              className="pt-4 border-t border-slate-800 space-y-2.5"
-            >
-              <label htmlFor="tv-server-url" className="block text-xs font-medium text-slate-300">
-                NetPulse Server URL (for APK / LAN / Deployed Cloud Run)
-              </label>
-              <div className="flex items-center gap-2">
-                <input
-                  id="tv-server-url"
-                  type="url"
-                  value={serverUrlInput}
-                  onChange={(e) => setServerUrlInput(e.target.value)}
-                  placeholder="https://your-app.run.app or http://192.168.1.x:3000"
-                  className="flex-1 h-10 px-3 text-xs font-mono bg-slate-950 border border-slate-700 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-400"
-                />
-                <button
-                  type="submit"
-                  className="h-10 px-3.5 text-xs font-semibold bg-slate-800 text-white border border-slate-700 rounded-md hover:bg-slate-700 whitespace-nowrap"
-                >
-                  Save &amp; Retry
-                </button>
-              </div>
-            </form>
-          )}
         </section>
 
         {/* Right: Incoming Files Queue */}
         <section className="lg:col-span-7 bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-5">
           <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-800">
             <div>
-              <h2 className="text-xl font-semibold text-white">Incoming Files &amp; APKs</h2>
+              <h2 className="text-xl font-semibold text-white">Received Files &amp; APKs</h2>
               <p className="mt-1 text-sm text-slate-300">
-                Select any file with your TV remote to download or install it on your TV.
+                Select any received file with your TV remote to save or install it on your TV.
               </p>
             </div>
             <span className="text-sm font-mono tabular-nums text-slate-300">
-              {room?.files.length ?? 0} {room?.files.length === 1 ? 'file' : 'files'}
+              {receivedFiles.length} {receivedFiles.length === 1 ? 'file' : 'files'}
             </span>
           </div>
 
-          {!room || room.files.length === 0 ? (
+          {incomingProgress && (
+            <div className="p-4 bg-slate-950 border border-blue-500/40 rounded-lg space-y-2">
+              <div className="flex items-center justify-between gap-3 text-sm">
+                <span className="font-medium text-white truncate">
+                  Receiving {incomingProgress.name}...
+                </span>
+                <span className="font-mono tabular-nums text-blue-300 shrink-0">
+                  {incomingPct}%
+                </span>
+              </div>
+              <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-blue-500 transition-all"
+                  style={{ width: `${incomingPct}%` }}
+                />
+              </div>
+              <div className="text-xs font-mono tabular-nums text-slate-400">
+                {formatBytes(incomingProgress.receivedBytes)} / {formatBytes(incomingProgress.size)}
+              </div>
+            </div>
+          )}
+
+          {receivedFiles.length === 0 ? (
             <div className="py-16 border border-dashed border-slate-700 rounded-lg text-center px-6">
               <p className="text-base font-medium text-slate-200">
                 Waiting for files from your phone or computer
               </p>
               <p className="mt-2 text-sm text-slate-400 max-w-md mx-auto">
-                Files uploaded to code{' '}
-                <span className="font-mono text-white">{room?.code || '------'}</span> or queued
-                from GitHub Releases will appear here automatically.
+                Enter code <span className="font-mono text-white">{roomCode}</span> on the sending
+                device and drop any file or APK—it streams straight here over P2P.
               </p>
             </div>
           ) : (
             <div className="space-y-3">
-              {room.files.map((file) => {
+              {receivedFiles.map((file) => {
                 const isApk = /\.(apk|xapk|apks)$/i.test(file.name);
                 return (
                   <div
@@ -407,22 +298,18 @@ export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProp
                           {file.name}
                         </div>
                         <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-slate-300 font-mono tabular-nums">
-                          <span>{fileCategoryLabel(file)}</span>
+                          <span>{fileCategoryLabel(file.name)}</span>
                           <span aria-hidden="true" className="text-slate-600">·</span>
                           <span>{formatBytes(file.size)}</span>
                           <span aria-hidden="true" className="text-slate-600">·</span>
-                          <span>
-                            {file.source === 'github' && file.sourceDetail
-                              ? `GitHub (${file.sourceDetail})`
-                              : 'Direct Upload'}
-                          </span>
+                          <span>Direct P2P</span>
                         </div>
                       </div>
                     </div>
 
-                    <a
-                      href={apiUrl(file.downloadUrl)}
-                      download={file.name}
+                    <button
+                      type="button"
+                      onClick={() => void saveOrShareReceivedFile(file)}
                       className={`inline-flex items-center justify-center gap-2 px-5 py-3 text-sm font-semibold rounded-lg focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-blue-400 transition-colors whitespace-nowrap shrink-0 ${
                         isApk
                           ? 'bg-emerald-600 text-white hover:bg-emerald-500'
@@ -430,8 +317,8 @@ export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProp
                       }`}
                     >
                       <Download className="w-4 h-4" />
-                      {isApk ? 'Download & Install APK' : 'Download File'}
-                    </a>
+                      {isApk ? 'Save / Install APK' : 'Save File'}
+                    </button>
                   </div>
                 );
               })}

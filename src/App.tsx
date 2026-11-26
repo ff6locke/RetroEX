@@ -421,7 +421,7 @@ export default function App() {
           <nav className="flex items-center gap-5 overflow-x-auto text-sm font-medium">
             {(
               [
-                { id: 'tv-transfer', label: 'TV Transfer' },
+                { id: 'tv-transfer', label: 'File Send' },
                 { id: 'lan-devices', label: 'LAN Devices' },
                 { id: 'diagnose', label: 'Diagnose' },
                 { id: 'live', label: 'Live Ping' },
