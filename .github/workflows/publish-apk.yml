@@ -248,7 +248,7 @@ public class MainActivity extends BridgeActivity {
         }
     }
 }
-`;
+              `;
               fs.writeFileSync(mainActPath, javaCode);
               console.log("Injected RetroExBridge into " + mainActPath);
             }
