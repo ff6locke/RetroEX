@@ -1,21 +1,20 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Bluetooth,
   CheckCircle2,
   ExternalLink,
   Gamepad2,
-  Info,
   Keyboard,
+  Maximize2,
   Play,
   QrCode,
   Radio,
-  RotateCcw,
-  Settings,
   Smartphone,
   Upload,
   Volume2,
   VolumeX,
   X,
+  Zap,
 } from 'lucide-react';
 import { QrCodeSvg } from './QrCodeSvg';
 import { getPublicAppOrigin } from '../utils/apiUrl';
@@ -108,11 +107,34 @@ function buildMqttPacket(typeAndFlags: number, bodyParts: Uint8Array[]): Uint8Ar
   return out;
 }
 
+const TV_PERF_STORAGE_KEY = 'retroex_tv_perf_mode_v1';
+
+function detectAndroidTvBox(): boolean {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
+  try {
+    const saved = localStorage.getItem(TV_PERF_STORAGE_KEY);
+    if (saved === '1') return true;
+    if (saved === '0') return false;
+  } catch {
+    // ignore storage errors
+  }
+  const ua = navigator.userAgent || '';
+  if (/Android.*(TV|AFT|BRAVIA|SHIELD|RockTek|GX1|MIBOX|Chromecast|Leanback|SmartTV|GoogleTV)/i.test(ua)) {
+    return true;
+  }
+  // Android device without touch points (typically TV boxes / HDMI sticks)
+  if (/Android/i.test(ua) && (navigator.maxTouchPoints ?? 0) === 0) {
+    return true;
+  }
+  return false;
+}
+
 export function SnesEmulatorPanel({ roomCode = '123456' }: SnesEmulatorPanelProps) {
   const [romLoaded, setRomLoaded] = useState(false);
   const [romName, setRomName] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [muted, setMuted] = useState(false);
+  const [tvPerfMode, setTvPerfMode] = useState<boolean>(() => detectAndroidTvBox());
   const [romBlobUrl, setRomBlobUrl] = useState<string | null>(null);
   const [showMappingModal, setShowMappingModal] = useState(false);
   const [modalTab, setModalTab] = useState<'bluetooth' | 'phone-pad' | 'keys'>('bluetooth');
@@ -130,6 +152,57 @@ export function SnesEmulatorPanel({ roomCode = '123456' }: SnesEmulatorPanelProp
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const lastInputLabelRef = useRef<HTMLSpanElement | null>(null);
+  const showMappingModalRef = useRef(showMappingModal);
+  const mutedRef = useRef(muted);
+
+  useEffect(() => {
+    showMappingModalRef.current = showMappingModal;
+  }, [showMappingModal]);
+
+  useEffect(() => {
+    mutedRef.current = muted;
+    try {
+      const win = iframeRef.current?.contentWindow as
+        | (Window & { EJS_emulator?: { setVolume?: (v: number) => void } })
+        | null;
+      win?.EJS_emulator?.setVolume?.(muted ? 0 : 1.0);
+    } catch {
+      // ignore if iframe not initialized
+    }
+  }, [muted]);
+
+  const toggleTvPerfMode = () => {
+    setTvPerfMode((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(TV_PERF_STORAGE_KEY, next ? '1' : '0');
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  };
+
+  const reportDetectedInput = useCallback(
+    (key: string, code: string, label: string, source: 'keyboard' | 'bluetooth' | 'gamepad') => {
+      // Update header badge directly via DOM ref so gameplay never triggers React re-renders
+      if (lastInputLabelRef.current) {
+        lastInputLabelRef.current.textContent = label;
+        lastInputLabelRef.current.className = 'text-emerald-400 font-bold';
+      }
+      if (showMappingModalRef.current) {
+        setLastDetectedInput({
+          key,
+          code,
+          label,
+          source,
+          timestamp: Date.now(),
+        });
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     return () => {
@@ -140,28 +213,31 @@ export function SnesEmulatorPanel({ roomCode = '123456' }: SnesEmulatorPanelProp
   }, [romBlobUrl]);
 
   // Dispatch key event into EmulatorJS iframe
-  const dispatchKeyToEmulator = (type: 'keydown' | 'keyup', key: string, code: string, keyCode: number) => {
-    const iframe = iframeRef.current;
-    if (!iframe) return;
-    try {
-      const doc = iframe.contentDocument || iframe.contentWindow?.document;
-      const targetWindow = iframe.contentWindow;
-      if (doc && targetWindow) {
-        const evt = new KeyboardEvent(type, {
-          key,
-          code,
-          keyCode,
-          which: keyCode,
-          bubbles: true,
-          cancelable: true,
-        });
-        doc.dispatchEvent(evt);
-        targetWindow.dispatchEvent(evt);
+  const dispatchKeyToEmulator = useCallback(
+    (type: 'keydown' | 'keyup', key: string, code: string, keyCode: number) => {
+      const iframe = iframeRef.current;
+      if (!iframe) return;
+      try {
+        const doc = iframe.contentDocument || iframe.contentWindow?.document;
+        const targetWindow = iframe.contentWindow;
+        if (doc && targetWindow) {
+          const evt = new KeyboardEvent(type, {
+            key,
+            code,
+            keyCode,
+            which: keyCode,
+            bubbles: true,
+            cancelable: true,
+          });
+          doc.dispatchEvent(evt);
+          targetWindow.dispatchEvent(evt);
+        }
+      } catch {
+        // Cross-origin fallback
       }
-    } catch {
-      // Cross-origin fallback
-    }
-  };
+    },
+    []
+  );
 
   // 1. Listen for Bluetooth Virtual Keyboard and Physical Keyboard input globally
   useEffect(() => {
@@ -171,17 +247,10 @@ export function SnesEmulatorPanel({ roomCode = '123456' }: SnesEmulatorPanelProp
         return;
       }
 
-      const mapped = SNES_KEY_MAP[e.code] || SNES_KEY_MAP[e.key];
-      const label = mapped ? `${mapped.label} (${mapped.snes})` : e.code || e.key;
-
-      if (e.type === 'keydown') {
-        setLastDetectedInput({
-          key: e.key,
-          code: e.code,
-          label,
-          source: 'bluetooth',
-          timestamp: Date.now(),
-        });
+      if (e.type === 'keydown' && !e.repeat) {
+        const mapped = SNES_KEY_MAP[e.code] || SNES_KEY_MAP[e.key];
+        const label = mapped ? `${mapped.label} (${mapped.snes})` : e.code || e.key;
+        reportDetectedInput(e.key, e.code, label, 'bluetooth');
       }
 
       // Forward into emulator iframe so Bluetooth virtual keyboards work without iframe focus!
@@ -194,22 +263,31 @@ export function SnesEmulatorPanel({ roomCode = '123456' }: SnesEmulatorPanelProp
       window.removeEventListener('keydown', handleGlobalKey);
       window.removeEventListener('keyup', handleGlobalKey);
     };
-  }, []);
+  }, [dispatchKeyToEmulator, reportDetectedInput]);
 
   // 2. Listen for Bluetooth Gamepads via Web Gamepad API
   useEffect(() => {
     const updateGamepads = () => {
       if (typeof navigator !== 'undefined' && navigator.getGamepads) {
-        const pads = Array.from(navigator.getGamepads()).filter(
-          (p): p is Gamepad => p !== null && p.connected
-        );
-        setConnectedGamepads(pads.map((p) => ({ id: p.id, index: p.index })));
+        const pads = Array.from(navigator.getGamepads())
+          .filter((p): p is Gamepad => p !== null && p.connected)
+          .map((p) => ({ id: p.id, index: p.index }));
+
+        setConnectedGamepads((prev) => {
+          if (
+            prev.length === pads.length &&
+            prev.every((item, idx) => item.index === pads[idx].index && item.id === pads[idx].id)
+          ) {
+            return prev;
+          }
+          return pads;
+        });
       }
     };
 
     window.addEventListener('gamepadconnected', updateGamepads);
     window.addEventListener('gamepaddisconnected', updateGamepads);
-    const interval = window.setInterval(updateGamepads, 1500);
+    const interval = window.setInterval(updateGamepads, 2500);
 
     return () => {
       window.removeEventListener('gamepadconnected', updateGamepads);
@@ -224,18 +302,12 @@ export function SnesEmulatorPanel({ roomCode = '123456' }: SnesEmulatorPanelProp
       try {
         const data = JSON.parse(raw);
         if (data.type === 'snes-key' && data.button) {
-          setPhonePadLinked(true);
+          setPhonePadLinked((prev) => (prev ? prev : true));
           const keyInfo = BUTTON_TO_KEY_EVENT[data.button];
           if (keyInfo) {
             const eventType = data.action === 'down' ? 'keydown' : 'keyup';
             if (eventType === 'keydown') {
-              setLastDetectedInput({
-                key: keyInfo.key,
-                code: keyInfo.code,
-                label: `SNES Button ${data.button}`,
-                source: 'gamepad',
-                timestamp: Date.now(),
-              });
+              reportDetectedInput(keyInfo.key, keyInfo.code, `SNES Button ${data.button}`, 'gamepad');
             }
             dispatchKeyToEmulator(eventType, keyInfo.key, keyInfo.code, keyInfo.keyCode);
           }
@@ -299,7 +371,7 @@ export function SnesEmulatorPanel({ roomCode = '123456' }: SnesEmulatorPanelProp
       bc.close();
       if (ws) ws.close();
     };
-  }, [roomCode]);
+  }, [roomCode, dispatchKeyToEmulator, reportDetectedInput]);
 
   // Build emulator iframe when playing
   useEffect(() => {
@@ -322,6 +394,28 @@ export function SnesEmulatorPanel({ roomCode = '123456' }: SnesEmulatorPanelProp
     const doc = iframe.contentDocument || iframe.contentWindow?.document;
     if (!doc) return;
 
+    const defaultOpts = tvPerfMode
+      ? {
+          vsync: 'disabled',
+          shader: 'disabled',
+          rewindEnabled: 'disabled',
+          webgl2Enabled: 'disabled',
+          snes9x_audio_interpolation: 'none',
+          snes9x_blargg: 'disabled',
+          snes9x_hires_blend: 'disabled',
+          snes9x_overclock_cycles: 'disabled',
+          snes9x_reduce_sprite_flicker: 'disabled',
+          'save-state-location': 'browser',
+        }
+      : {
+          vsync: 'enabled',
+          shader: 'disabled',
+          rewindEnabled: 'disabled',
+          snes9x_blargg: 'disabled',
+          snes9x_hires_blend: 'disabled',
+          'save-state-location': 'browser',
+        };
+
     doc.open();
     doc.write(`
       <!DOCTYPE html>
@@ -341,28 +435,86 @@ export function SnesEmulatorPanel({ roomCode = '123456' }: SnesEmulatorPanelProp
               width: 100%;
               height: 100%;
             }
+            canvas {
+              image-rendering: pixelated;
+              image-rendering: crisp-edges;
+            }
           </style>
         </head>
         <body>
           <div id="game"></div>
           <script>
+            (function() {
+              var tvPerf = ${tvPerfMode ? 'true' : 'false'};
+              if (tvPerf) {
+                // Prevent 2x/3x HiDPI framebuffer scaling on 4K/1080p Android TV boxes (RockTek GX1)
+                try {
+                  Object.defineProperty(window, 'devicePixelRatio', {
+                    get: function() { return 1; },
+                    configurable: true
+                  });
+                } catch (e) {}
+
+                // Increase AudioContext playback buffer latency for HDMI TV output so audio never crackles or warps
+                try {
+                  var OrigAudioCtx = window.AudioContext || window.webkitAudioContext;
+                  if (OrigAudioCtx) {
+                    var PatchedAudioCtx = function(opts) {
+                      var merged = Object.assign({ latencyHint: 'playback' }, opts || {});
+                      merged.latencyHint = 'playback';
+                      return new OrigAudioCtx(merged);
+                    };
+                    PatchedAudioCtx.prototype = OrigAudioCtx.prototype;
+                    if (window.AudioContext) window.AudioContext = PatchedAudioCtx;
+                    if (window.webkitAudioContext) window.webkitAudioContext = PatchedAudioCtx;
+                  }
+                } catch (e) {}
+
+                // Disable expensive WebGL MSAA / alpha compositing on TV WebView Mali GPU
+                try {
+                  var origGetContext = HTMLCanvasElement.prototype.getContext;
+                  HTMLCanvasElement.prototype.getContext = function(type, attrs) {
+                    if (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl') {
+                      var fastAttrs = Object.assign({}, attrs || {}, {
+                        alpha: false,
+                        antialias: false,
+                        desynchronized: true,
+                        powerPreference: 'high-performance',
+                        preserveDrawingBuffer: false
+                      });
+                      return origGetContext.call(this, type, fastAttrs);
+                    }
+                    return origGetContext.call(this, type, attrs);
+                  };
+                } catch (e) {}
+              }
+
+              // Suppress WakeLock permission errors inside sandbox
+              if (navigator.wakeLock && navigator.wakeLock.request) {
+                var origWakeLock = navigator.wakeLock.request.bind(navigator.wakeLock);
+                navigator.wakeLock.request = function(type) {
+                  return origWakeLock(type).catch(function() { return null; });
+                };
+              }
+            })();
+
             window.EJS_player = '#game';
             window.EJS_core = 'snes';
             window.EJS_pathtodata = 'https://cdn.emulatorjs.org/stable/data/';
             window.EJS_gameUrl = ${JSON.stringify(romBlobUrl)};
             window.EJS_mouse = false;
             window.EJS_multitap = false;
-            window.EJS_volume = ${muted ? 0 : 1.0};
+            window.EJS_volume = ${mutedRef.current ? 0 : 1.0};
             window.EJS_color = '#0f172a';
-            // Suppress WakeLock permission errors inside sandbox
-            if (navigator.wakeLock && navigator.wakeLock.request) {
-              const orig = navigator.wakeLock.request.bind(navigator.wakeLock);
-              navigator.wakeLock.request = function(type) {
-                return orig(type).catch(function(e) {
-                  return null;
-                });
-              };
-            }
+            window.EJS_forceLegacyCores = ${tvPerfMode ? 'true' : 'false'};
+            window.EJS_defaultOptions = ${JSON.stringify(defaultOpts)};
+            window.EJS_onGameStart = function() {
+              try {
+                if (${tvPerfMode ? 'true' : 'false'} && window.EJS_emulator && window.EJS_emulator.gameManager) {
+                  window.EJS_emulator.gameManager.setVSync(false);
+                }
+              } catch (e) {}
+            };
           </script>
           <script src="https://cdn.emulatorjs.org/stable/data/loader.js"></script>
         </body>
@@ -371,15 +523,16 @@ export function SnesEmulatorPanel({ roomCode = '123456' }: SnesEmulatorPanelProp
     doc.close();
 
     // Auto-focus iframe so keyboard input hits it directly
-    setTimeout(() => {
+    const focusTimer = window.setTimeout(() => {
       iframe.focus();
     }, 500);
 
     return () => {
+      window.clearTimeout(focusTimer);
       if (container) container.innerHTML = '';
       iframeRef.current = null;
     };
-  }, [isPlaying, romBlobUrl, muted]);
+  }, [isPlaying, romBlobUrl, tvPerfMode]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -405,6 +558,16 @@ export function SnesEmulatorPanel({ roomCode = '123456' }: SnesEmulatorPanelProp
     setRomName('Super_Mario_World.zip');
     setRomLoaded(true);
     setIsPlaying(true);
+  };
+
+  const handleFullscreen = () => {
+    const el = containerRef.current;
+    if (!el) return;
+    if (document.fullscreenElement) {
+      void document.exitFullscreen().catch(() => {});
+    } else if (el.requestFullscreen) {
+      void el.requestFullscreen().catch(() => {});
+    }
   };
 
   const publicOrigin = getPublicAppOrigin();
@@ -450,7 +613,7 @@ export function SnesEmulatorPanel({ roomCode = '123456' }: SnesEmulatorPanelProp
       <div className="bg-slate-900 text-white rounded-lg p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs">
         <div className="flex flex-wrap items-center gap-4">
           <div className="flex items-center gap-2">
-            <Radio className="w-4 h-4 text-emerald-400 animate-pulse" />
+            <Radio className={`w-4 h-4 text-emerald-400 ${!isPlaying ? 'animate-pulse' : ''}`} />
             <span className="font-semibold text-slate-200">Input Listener:</span>
             <span className="text-emerald-400 font-mono">Active (Global Forwarding)</span>
           </div>
@@ -476,17 +639,12 @@ export function SnesEmulatorPanel({ roomCode = '123456' }: SnesEmulatorPanelProp
           )}
         </div>
 
-        {/* Real-time Last Key Pressed Badge */}
+        {/* Real-time Last Key Pressed Badge (updated via ref during gameplay to avoid re-renders) */}
         <div className="flex items-center gap-2 font-mono bg-slate-950 px-3 py-1.5 rounded border border-slate-800">
           <span className="text-slate-400 text-[11px]">Last Input:</span>
-          {lastDetectedInput ? (
-            <span className="text-emerald-400 font-bold flex items-center gap-1.5">
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-              {lastDetectedInput.label}
-            </span>
-          ) : (
-            <span className="text-slate-500 italic">Press any key/button to test</span>
-          )}
+          <span ref={lastInputLabelRef} className="text-slate-500 italic">
+            Press any key/button to test
+          </span>
         </div>
       </div>
 
@@ -519,8 +677,8 @@ export function SnesEmulatorPanel({ roomCode = '123456' }: SnesEmulatorPanelProp
           </div>
 
           {/* Controls Bar */}
-          <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl flex flex-wrap items-center justify-between gap-4">
-            <div className="flex items-center gap-2">
+          <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={() => setIsPlaying((p) => !p)}
@@ -532,9 +690,31 @@ export function SnesEmulatorPanel({ roomCode = '123456' }: SnesEmulatorPanelProp
               <button
                 type="button"
                 onClick={() => setMuted((m) => !m)}
+                aria-label={muted ? 'Unmute audio' : 'Mute audio'}
                 className="p-2 text-slate-700 bg-white border border-slate-200 rounded hover:bg-slate-100"
               >
                 {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+              </button>
+              <button
+                type="button"
+                onClick={handleFullscreen}
+                aria-label="Toggle fullscreen"
+                className="p-2 text-slate-700 bg-white border border-slate-200 rounded hover:bg-slate-100"
+              >
+                <Maximize2 className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={toggleTvPerfMode}
+                title="Optimizes audio buffering, 1x pixel scaling & WebGL1 for RockTek GX1 and Android TV boxes"
+                className={`inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded border transition-colors ${
+                  tvPerfMode
+                    ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
+                    : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                }`}
+              >
+                <Zap className={`w-3.5 h-3.5 ${tvPerfMode ? 'text-emerald-600' : 'text-slate-400'}`} />
+                TV Speed Mode: {tvPerfMode ? 'On' : 'Off'}
               </button>
             </div>
 

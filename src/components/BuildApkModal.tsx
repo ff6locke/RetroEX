@@ -22,6 +22,36 @@ interface BuildApkModalProps {
 }
 
 const LAST_REPO_STORAGE_KEY = 'retroex_last_github_repo_v1';
+const LEGACY_STORAGE_KEYS = ['tellybeam_last_github_repo_v1', 'netpulse_last_github_repo_v1'];
+
+function isLegacyRepoName(name: string): boolean {
+  const n = name.trim().toLowerCase();
+  if (!n) return true;
+  if (n === 'retro') return true;
+  return /^(netp[iu]lse|tellybeam|snesex)(-|$)/i.test(n);
+}
+
+function readSavedRepo(): { owner: string; repo: string } {
+  try {
+    for (const key of LEGACY_STORAGE_KEYS) {
+      localStorage.removeItem(key);
+    }
+    const saved = localStorage.getItem(LAST_REPO_STORAGE_KEY);
+    if (!saved) return { owner: '', repo: 'RetroEX' };
+    const parsed = JSON.parse(saved) as { owner?: string; repo?: string };
+    const owner = typeof parsed.owner === 'string' ? parsed.owner : '';
+    const repo =
+      typeof parsed.repo === 'string' && parsed.repo.trim() && !isLegacyRepoName(parsed.repo)
+        ? parsed.repo.trim()
+        : 'RetroEX';
+    if (parsed.repo && isLegacyRepoName(parsed.repo)) {
+      localStorage.setItem(LAST_REPO_STORAGE_KEY, JSON.stringify({ owner, repo: 'RetroEX' }));
+    }
+    return { owner, repo };
+  } catch {
+    return { owner: '', repo: 'RetroEX' };
+  }
+}
 
 async function readJsonSafe<T = Record<string, unknown>>(
   res: Response,
@@ -47,37 +77,8 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
   const [ghRepos, setGhRepos] = useState<GithubRepoEntry[]>([]);
   const [ghReposLoading, setGhReposLoading] = useState(false);
 
-  const [ghOwner, setGhOwner] = useState(() => {
-    try {
-      const saved =
-        localStorage.getItem(LAST_REPO_STORAGE_KEY) ||
-        localStorage.getItem('tellybeam_last_github_repo_v1');
-      return saved ? (JSON.parse(saved).owner as string) || '' : '';
-    } catch {
-      return '';
-    }
-  });
-  const [ghRepo, setGhRepo] = useState(() => {
-    try {
-      const saved =
-        localStorage.getItem(LAST_REPO_STORAGE_KEY) ||
-        localStorage.getItem('tellybeam_last_github_repo_v1');
-      if (saved) {
-        const parsed = (JSON.parse(saved).repo as string) || '';
-        if (
-          parsed &&
-          !['tellybeam', 'tellybeam-tv-apk', 'snesex', 'snesex-apk', 'retro'].includes(
-            parsed.toLowerCase()
-          )
-        ) {
-          return parsed;
-        }
-      }
-      return 'RetroEX';
-    } catch {
-      return 'RetroEX';
-    }
-  });
+  const [ghOwner, setGhOwner] = useState(() => readSavedRepo().owner);
+  const [ghRepo, setGhRepo] = useState(() => readSavedRepo().repo);
   const [ghBranch, setGhBranch] = useState('main');
 
   const [compileTag, setCompileTag] = useState('v1.0.0');
@@ -144,23 +145,20 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
             if (reposRes.ok && reposData.ok && Array.isArray(reposData.repos)) {
               const list = reposData.repos;
               setGhRepos(list);
-              if (statusData.username && !ghOwner) {
-                setGhOwner(statusData.username);
-              }
-              if (list.length > 0) {
-                if (!ghOwner) setGhOwner(statusData.username || list[0].owner);
-                const retroexRepo = list.find((r) => r.name.toLowerCase() === 'retroex');
-                if (retroexRepo) {
-                  setGhRepo(retroexRepo.name);
-                  setGhBranch(retroexRepo.defaultBranch || 'main');
-                } else if (
-                  !ghRepo ||
-                  ['tellybeam-tv-apk', 'snesex-apk', 'snesex', 'tellybeam', 'retro'].includes(
-                    ghRepo.toLowerCase()
-                  )
-                ) {
-                  setGhRepo('RetroEX');
-                }
+              const retroexRepo = list.find((r) => r.name.toLowerCase() === 'retroex');
+              if (retroexRepo) {
+                setGhOwner(retroexRepo.owner);
+                setGhRepo(retroexRepo.name);
+                setGhBranch(retroexRepo.defaultBranch || 'main');
+                saveRepoToStorage(retroexRepo.owner, retroexRepo.name);
+              } else {
+                const defaultOwner = statusData.username || list[0]?.owner || '';
+                setGhOwner((prev) => prev || defaultOwner);
+                setGhRepo((prev) => {
+                  const next = !prev || isLegacyRepoName(prev) ? 'RetroEX' : prev;
+                  if (defaultOwner) saveRepoToStorage(defaultOwner, next);
+                  return next;
+                });
               }
             } else if (!reposRes.ok) {
               setGhAuthError(reposData.error || `Failed to load repositories (HTTP ${reposRes.status}).`);
@@ -176,7 +174,7 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
         setGhAuthError(err instanceof Error ? err.message : 'Unable to reach GitHub status API.');
       }
     },
-    [ghSessionId, ghOwner, ghRepo]
+    [ghSessionId]
   );
 
   useEffect(() => {
@@ -345,9 +343,9 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
     }
   };
 
-  const handleRenameRepoToRetroEX = async () => {
-    const owner = ghOwner.trim();
-    const currentRepo = ghRepo.trim();
+  const handleRenameRepoToRetroEX = async (ownerOverride?: string, repoOverride?: string) => {
+    const owner = (ownerOverride ?? ghOwner).trim();
+    const currentRepo = (repoOverride ?? ghRepo).trim();
     if (!owner || !currentRepo) {
       setCompileError('Specify GitHub owner and current repository first.');
       return;
@@ -378,6 +376,7 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
       }
 
       const updatedName = data.newName || 'RetroEX';
+      setGhOwner(owner);
       setGhRepo(updatedName);
       saveRepoToStorage(owner, updatedName);
       setRenameSuccessMsg(data.message || `Successfully renamed to ${updatedName} on GitHub!`);
@@ -562,6 +561,31 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
                   {showCreateRepo ? 'Cancel' : 'New Repo'}
                 </button>
               </div>
+
+              {(() => {
+                const hasRetroex = ghRepos.some((r) => r.name.toLowerCase() === 'retroex');
+                const legacyRepo = !hasRetroex
+                  ? ghRepos.find((r) => isLegacyRepoName(r.name))
+                  : undefined;
+                if (!legacyRepo) return null;
+                return (
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-md flex flex-wrap items-center justify-between gap-2 text-xs text-amber-900">
+                    <span>
+                      Your GitHub account still has legacy repo{' '}
+                      <strong className="font-mono">{legacyRepo.fullName}</strong>. Rename it or
+                      compile directly into <strong className="font-mono">RetroEX</strong>.
+                    </span>
+                    <button
+                      type="button"
+                      disabled={renamingRepo}
+                      onClick={() => void handleRenameRepoToRetroEX(legacyRepo.owner, legacyRepo.name)}
+                      className="px-3 py-1.5 font-medium text-white bg-amber-700 hover:bg-amber-800 rounded disabled:opacity-50 whitespace-nowrap"
+                    >
+                      {renamingRepo ? 'Renaming...' : `Rename ${legacyRepo.name} → RetroEX`}
+                    </button>
+                  </div>
+                );
+              })()}
 
               {showCreateRepo && (
                 <form
