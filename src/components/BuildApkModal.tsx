@@ -54,19 +54,70 @@ function readSavedRepo(): { owner: string; repo: string } {
 }
 
 async function readJsonSafe<T = Record<string, unknown>>(
-  res: Response,
-  endpointLabel: string
-): Promise<T> {
-  const text = await res.text();
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    const titleMatch = text.match(/<title>([^<]+)<\/title>/i);
-    const hint = titleMatch?.[1]?.trim() || text.replace(/\s+/g, ' ').slice(0, 100);
-    throw new Error(
-      `${endpointLabel} returned non-JSON response (HTTP ${res.status}): ${hint || 'Empty response'}`
-    );
+  fetcher: (() => Promise<Response>) | RequestInfo | URL,
+  initOrLabel?: RequestInit | string,
+  maybeLabel = 'API request'
+): Promise<{ res: Response; data: T }> {
+  const maxRetries = 6;
+  const getResponse = async (): Promise<Response> => {
+    if (typeof fetcher === 'function') {
+      return await fetcher();
+    }
+    const init = typeof initOrLabel === 'object' ? initOrLabel : undefined;
+    return await fetch(fetcher, init);
+  };
+
+  let endpointLabel = 'API request';
+  if (typeof initOrLabel === 'string') {
+    endpointLabel = initOrLabel;
+  } else if (typeof maybeLabel === 'string') {
+    endpointLabel = maybeLabel;
   }
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await getResponse();
+      const text = await res.text();
+      if (
+        text.includes('Starting Server') ||
+        text.includes('Vite') ||
+        text.trim().startsWith('<!DOCTYPE') ||
+        text.trim().startsWith('<html')
+      ) {
+        if (attempt < maxRetries) {
+          await new Promise((r) => window.setTimeout(r, 2000));
+          continue;
+        }
+        throw new Error(
+          `${endpointLabel} backend is starting up. Please wait a moment and try again.`
+        );
+      }
+      try {
+        const data = JSON.parse(text) as T;
+        return { res, data };
+      } catch {
+        const titleMatch = text.match(/<title>([^<]+)<\/title>/i);
+        const hint = titleMatch?.[1]?.trim() || text.replace(/\s+/g, ' ').slice(0, 100);
+        throw new Error(
+          `${endpointLabel} returned non-JSON response (HTTP ${res.status}): ${hint || 'Empty response'}`
+        );
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isStartingUp =
+        msg.includes('Starting Server') ||
+        msg.includes('starting up') ||
+        msg.includes('Failed to fetch') ||
+        msg.includes('NetworkError');
+      if (isStartingUp && attempt < maxRetries) {
+        await new Promise((r) => window.setTimeout(r, 2000));
+        continue;
+      }
+      if (attempt >= maxRetries) throw err;
+      await new Promise((r) => window.setTimeout(r, 2000));
+    }
+  }
+  throw new Error(`${endpointLabel} failed after multiple attempts.`);
 }
 
 export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
@@ -129,19 +180,23 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
       if (sid) headers.Authorization = `Bearer ${sid}`;
 
       try {
-        const res = await fetch(apiUrl('/api/github/status'), { cache: 'no-store', headers });
-        const statusData = await readJsonSafe<GithubStatusResponse>(res, 'GitHub status');
+        const { data: statusData } = await readJsonSafe<GithubStatusResponse>(
+          () => fetch(apiUrl('/api/github/status'), { cache: 'no-store', headers }),
+          'GitHub status'
+        );
         setGhStatus(statusData);
 
         if (statusData.configured && statusData.tokenValid) {
           setGhReposLoading(true);
           try {
-            const reposRes = await fetch(apiUrl('/api/github/repos'), { cache: 'no-store', headers });
-            const reposData = await readJsonSafe<{
+            const { res: reposRes, data: reposData } = await readJsonSafe<{
               ok: boolean;
               error?: string;
               repos?: GithubRepoEntry[];
-            }>(reposRes, 'GitHub repos');
+            }>(
+              () => fetch(apiUrl('/api/github/repos'), { cache: 'no-store', headers }),
+              'GitHub repos'
+            );
             if (reposRes.ok && reposData.ok && Array.isArray(reposData.repos)) {
               const list = reposData.repos;
               setGhRepos(list);
@@ -213,17 +268,20 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
       setRunsLoading(true);
       if (showErrors) setCompileError(null);
       try {
-        const res = await fetch(
-          apiUrl(
-            `/api/github/workflow-runs?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}`
-          ),
-          { cache: 'no-store', headers: buildGithubAuthHeaders() }
-        );
-        const data = await readJsonSafe<{
+        const { res, data } = await readJsonSafe<{
           ok: boolean;
           error?: string;
           runs?: GithubWorkflowRun[];
-        }>(res, 'Workflow runs');
+        }>(
+          () =>
+            fetch(
+              apiUrl(
+                `/api/github/workflow-runs?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}`
+              ),
+              { cache: 'no-store', headers: buildGithubAuthHeaders() }
+            ),
+          'Workflow runs'
+        );
         if (res.ok && data.ok) {
           setWorkflowRuns(data.runs || []);
         } else if (showErrors) {
@@ -260,9 +318,8 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
     setGhConnecting(true);
     setGhAuthError(null);
     try {
-      const res = await fetch(apiUrl('/api/auth/github/url'), { cache: 'no-store' });
-      const data = await readJsonSafe<{ ok: boolean; url?: string; error?: string }>(
-        res,
+      const { res, data } = await readJsonSafe<{ ok: boolean; url?: string; error?: string }>(
+        () => fetch(apiUrl('/api/auth/github/url'), { cache: 'no-store' }),
         'GitHub OAuth URL'
       );
       if (!res.ok || !data.ok || !data.url) {
@@ -312,19 +369,22 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
     setCreatingRepo(true);
     setCreateRepoError(null);
     try {
-      const res = await fetch(apiUrl('/api/github/create-repo'), {
-        method: 'POST',
-        headers: buildGithubAuthHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({
-          name: trimmed,
-          isPrivate: newRepoPrivate,
-        }),
-      });
-      const data = await readJsonSafe<{
+      const { res, data } = await readJsonSafe<{
         ok: boolean;
         error?: string;
         repo?: GithubRepoEntry;
-      }>(res, 'Create GitHub repo');
+      }>(
+        () =>
+          fetch(apiUrl('/api/github/create-repo'), {
+            method: 'POST',
+            headers: buildGithubAuthHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({
+              name: trimmed,
+              isPrivate: newRepoPrivate,
+            }),
+          }),
+        'Create GitHub repo'
+      );
       if (!res.ok || !data.ok || !data.repo) {
         setCreateRepoError(data.error || 'Could not create repository.');
         return;
@@ -354,21 +414,24 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
     setCompileError(null);
     setRenameSuccessMsg(null);
     try {
-      const res = await fetch(apiUrl('/api/github/rename-repo'), {
-        method: 'POST',
-        headers: buildGithubAuthHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({
-          owner,
-          currentRepo,
-          newRepo: 'RetroEX',
-        }),
-      });
-      const data = await readJsonSafe<{
+      const { res, data } = await readJsonSafe<{
         ok: boolean;
         error?: string;
         message?: string;
         newName?: string;
-      }>(res, 'Rename repository on GitHub');
+      }>(
+        () =>
+          fetch(apiUrl('/api/github/rename-repo'), {
+            method: 'POST',
+            headers: buildGithubAuthHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({
+              owner,
+              currentRepo,
+              newRepo: 'RetroEX',
+            }),
+          }),
+        'Rename repository on GitHub'
+      );
 
       if (!res.ok || !data.ok) {
         setCompileError(data.error || 'Failed to rename repository on GitHub.');
@@ -403,27 +466,30 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
     setRenameSuccessMsg(null);
 
     try {
-      const res = await fetch(apiUrl('/api/github/setup-and-compile'), {
-        method: 'POST',
-        headers: buildGithubAuthHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({
-          owner,
-          repo,
-          branch: ghBranch.trim() || 'main',
-          releaseTag: compileTag.trim() || 'v1.0.0',
-          appName: compileAppName.trim() || 'RetroEX',
-          appId: compileAppId.trim() || 'app.retroex.tv',
-          syncWorkflow: true,
-          syncSource,
-          serverUrl: '',
-        }),
-      });
-      const data = await readJsonSafe<{
+      const { res, data } = await readJsonSafe<{
         ok: boolean;
         error?: string;
         message?: string;
         actionsUrl?: string;
-      }>(res, 'Compile APK on GitHub');
+      }>(
+        () =>
+          fetch(apiUrl('/api/github/setup-and-compile'), {
+            method: 'POST',
+            headers: buildGithubAuthHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({
+              owner,
+              repo,
+              branch: ghBranch.trim() || 'main',
+              releaseTag: compileTag.trim() || 'v1.0.0',
+              appName: compileAppName.trim() || 'RetroEX',
+              appId: compileAppId.trim() || 'app.retroex.tv',
+              syncWorkflow: true,
+              syncSource,
+              serverUrl: '',
+            }),
+          }),
+        'Compile APK on GitHub'
+      );
       if (!res.ok || !data.ok) {
         if (res.status === 401) {
           setGhSessionId(null);
