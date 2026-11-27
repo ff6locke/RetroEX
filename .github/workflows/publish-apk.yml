@@ -13,13 +13,13 @@ on:
       app_name:
         description: 'Android application display name'
         required: false
-        default: 'TellyBeam TV'
+        default: 'RetroEX'
       app_id:
         description: 'Android package ID'
         required: false
-        default: 'app.tellybeam.tv'
+        default: 'app.retroex.tv'
       server_url:
-        description: 'Optional TellyBeam backend base URL for APK API calls'
+        description: 'Optional RetroEX backend base URL for APK API calls'
         required: false
         default: ''
 
@@ -58,16 +58,16 @@ jobs:
 
       - name: Package Android & TV project with Capacitor
         env:
-          APP_NAME: ${{ github.event.inputs.app_name || 'TellyBeam TV' }}
-          APP_ID: ${{ github.event.inputs.app_id || 'app.tellybeam.tv' }}
+          APP_NAME: ${{ github.event.inputs.app_name || 'RetroEX' }}
+          APP_ID: ${{ github.event.inputs.app_id || 'app.retroex.tv' }}
         run: |
           rm -rf android capacitor.config.json capacitor.config.ts
           npm install --no-save --legacy-peer-deps @capacitor/core@^8 @capacitor/cli@^8 @capacitor/android@^8
           node -e '
             const fs = require("fs");
             fs.writeFileSync("capacitor.config.json", JSON.stringify({
-              appId: process.env.APP_ID || "app.tellybeam.tv",
-              appName: process.env.APP_NAME || "TellyBeam TV",
+              appId: process.env.APP_ID || "app.retroex.tv",
+              appName: process.env.APP_NAME || "RetroEX",
               webDir: "dist",
               android: { allowMixedContent: true }
             }, null, 2));
@@ -98,7 +98,7 @@ jobs:
 
       - name: Configure upgradeable signing & version
         env:
-          SIGNING_CONFIG: ${{ secrets.TELLYBEAM_SIGNING_CONFIG }}
+          SIGNING_CONFIG: ${{ secrets.RETROEX_SIGNING_CONFIG || secrets.TELLYBEAM_SIGNING_CONFIG }}
           TAG_NAME: ${{ github.event.inputs.release_tag || github.ref_name || 'v1.0.0' }}
           RUN_NUMBER: ${{ github.run_number }}
         run: |
@@ -106,16 +106,16 @@ jobs:
             const fs = require("fs");
             const { execFileSync } = require("child_process");
 
-            const ksPath = "android/app/tellybeam-release.p12";
+            const ksPath = "android/app/retroex-release.p12";
             let storePassword = "";
-            let keyAlias = "tellybeam";
+            let keyAlias = "retroex";
             let keyPassword = "";
 
             const rawSecret = (process.env.SIGNING_CONFIG || "").trim();
             if (rawSecret) {
               const cfg = JSON.parse(rawSecret);
               if (!cfg.keystoreB64 || !cfg.storePassword || !cfg.keyAlias) {
-                throw new Error("TELLYBEAM_SIGNING_CONFIG secret is missing required fields.");
+                throw new Error("RETROEX_SIGNING_CONFIG secret is missing required fields.");
               }
               fs.writeFileSync(ksPath, Buffer.from(cfg.keystoreB64, "base64"));
               storePassword = String(cfg.storePassword);
@@ -132,8 +132,8 @@ jobs:
               ], { stdio: "inherit" });
               console.log("Loaded persistent release signing keystore.");
             } else {
-              console.warn("::warning::TELLYBEAM_SIGNING_CONFIG secret not found; generating a one-time release keystore. Future builds will require re-install unless TELLYBEAM_SIGNING_CONFIG is set.");
-              storePassword = "tellybeam_fallback_key";
+              console.warn("::warning::RETROEX_SIGNING_CONFIG secret not found; generating a one-time release keystore. Future builds will require re-install unless RETROEX_SIGNING_CONFIG is set.");
+              storePassword = "retroex_fallback_key";
               keyPassword = storePassword;
               execFileSync("keytool", [
                 "-genkeypair", "-v",
@@ -145,7 +145,7 @@ jobs:
                 "-validity", "10000",
                 "-storepass", storePassword,
                 "-keypass", keyPassword,
-                "-dname", "CN=TellyBeam TV, O=TellyBeam, C=US"
+                "-dname", "CN=RetroEX TV, O=RetroEX, C=US"
               ], { stdio: "inherit" });
             }
 
@@ -173,8 +173,8 @@ jobs:
               "        versionName " + JSON.stringify(versionName) + "\n" +
               "    }\n" +
               "    signingConfigs {\n" +
-              "        tellybeamRelease {\n" +
-              "            storeFile file(\"tellybeam-release.p12\")\n" +
+              "        retroexRelease {\n" +
+              "            storeFile file(\"retroex-release.p12\")\n" +
               "            storePassword System.getenv(\"ANDROID_STORE_PASSWORD\")\n" +
               "            keyAlias System.getenv(\"ANDROID_KEY_ALIAS\")\n" +
               "            keyPassword System.getenv(\"ANDROID_KEY_PASSWORD\")\n" +
@@ -183,7 +183,7 @@ jobs:
               "    }\n" +
               "    buildTypes {\n" +
               "        release {\n" +
-              "            signingConfig signingConfigs.tellybeamRelease\n" +
+              "            signingConfig signingConfigs.retroexRelease\n" +
               "        }\n" +
               "    }\n" +
               "}\n";
@@ -210,12 +210,12 @@ jobs:
             apksigner verify --print-certs "$APK_PATH"
           fi
           mkdir -p release-assets
-          cp "$APK_PATH" "release-assets/tellybeam-tv-${TAG_NAME}.apk"
+          cp "$APK_PATH" "release-assets/retroex-tv-${TAG_NAME}.apk"
 
       - name: Upload APK build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tellybeam-tv-apk
+          name: retroex-tv-apk
           path: release-assets/*.apk
           retention-days: 30
 
@@ -224,8 +224,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.release_tag || github.ref_name || 'v1.0.0' }}
-          name: "TellyBeam TV ${{ github.event.inputs.release_tag || github.ref_name || 'v1.0.0' }}"
-          body: "Automated Android & TV APK build from GitHub Actions."
+          name: "RetroEX ${{ github.event.inputs.release_tag || github.ref_name || 'v1.0.0' }}"
+          body: "Automated RetroEX Android & TV APK build from GitHub Actions."
           files: release-assets/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

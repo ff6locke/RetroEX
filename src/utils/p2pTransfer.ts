@@ -370,7 +370,7 @@ export class P2pTransferSession {
     public readonly roomCode: string,
     private readonly callbacks: P2pSessionCallbacks
   ) {
-    const topic = `tellybeam/p2p/v1/room/${roomCode}`;
+    const topic = `retroex/p2p/v1/room/${roomCode}`;
     this.callbacks.onStateChange('initializing', 'Connecting pairing relay...');
 
     this.mqtt = new MqttWssClient(
@@ -592,7 +592,7 @@ export class P2pTransferSession {
   private async startOffer(remoteId: string): Promise<void> {
     this.callbacks.onStateChange('pairing', 'Connecting directly to peer...');
     const pc = this.createPeerConnection(remoteId);
-    const dc = pc.createDataChannel('tellybeam-files', { ordered: true });
+    const dc = pc.createDataChannel('retroex-files', { ordered: true });
     this.attachDataChannel(dc);
 
     try {

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  CheckCircle2,
   ExternalLink,
   Github,
   Hammer,
@@ -20,7 +21,7 @@ interface BuildApkModalProps {
   onClose: () => void;
 }
 
-const LAST_REPO_STORAGE_KEY = 'tellybeam_last_github_repo_v1';
+const LAST_REPO_STORAGE_KEY = 'retroex_last_github_repo_v1';
 
 async function readJsonSafe<T = Record<string, unknown>>(
   res: Response,
@@ -48,7 +49,9 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
 
   const [ghOwner, setGhOwner] = useState(() => {
     try {
-      const saved = localStorage.getItem(LAST_REPO_STORAGE_KEY);
+      const saved =
+        localStorage.getItem(LAST_REPO_STORAGE_KEY) ||
+        localStorage.getItem('tellybeam_last_github_repo_v1');
       return saved ? (JSON.parse(saved).owner as string) || '' : '';
     } catch {
       return '';
@@ -56,17 +59,30 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
   });
   const [ghRepo, setGhRepo] = useState(() => {
     try {
-      const saved = localStorage.getItem(LAST_REPO_STORAGE_KEY);
-      return saved ? (JSON.parse(saved).repo as string) || '' : '';
+      const saved =
+        localStorage.getItem(LAST_REPO_STORAGE_KEY) ||
+        localStorage.getItem('tellybeam_last_github_repo_v1');
+      if (saved) {
+        const parsed = (JSON.parse(saved).repo as string) || '';
+        if (
+          parsed &&
+          !['tellybeam', 'tellybeam-tv-apk', 'snesex', 'snesex-apk', 'retro'].includes(
+            parsed.toLowerCase()
+          )
+        ) {
+          return parsed;
+        }
+      }
+      return 'RetroEX';
     } catch {
-      return '';
+      return 'RetroEX';
     }
   });
   const [ghBranch, setGhBranch] = useState('main');
 
   const [compileTag, setCompileTag] = useState('v1.0.0');
-  const [compileAppName, setCompileAppName] = useState('TellyBeam TV');
-  const [compileAppId, setCompileAppId] = useState('app.tellybeam.tv');
+  const [compileAppName, setCompileAppName] = useState('RetroEX');
+  const [compileAppId, setCompileAppId] = useState('app.retroex.tv');
   const [syncSource, setSyncSource] = useState(true);
   const [compiling, setCompiling] = useState(false);
   const [compileError, setCompileError] = useState<string | null>(null);
@@ -75,10 +91,13 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
   const [runsLoading, setRunsLoading] = useState(false);
 
   const [showCreateRepo, setShowCreateRepo] = useState(false);
-  const [newRepoName, setNewRepoName] = useState('tellybeam-tv-apk');
+  const [newRepoName, setNewRepoName] = useState('RetroEX');
   const [newRepoPrivate, setNewRepoPrivate] = useState(false);
   const [creatingRepo, setCreatingRepo] = useState(false);
   const [createRepoError, setCreateRepoError] = useState<string | null>(null);
+
+  const [renamingRepo, setRenamingRepo] = useState(false);
+  const [renameSuccessMsg, setRenameSuccessMsg] = useState<string | null>(null);
 
   const saveRepoToStorage = (owner: string, repo: string) => {
     try {
@@ -91,7 +110,7 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
   const buildGithubAuthHeaders = useCallback(
     (extra?: Record<string, string>): Record<string, string> => {
       const headers: Record<string, string> = {
-        'X-Requested-With': 'TellyBeam',
+        'X-Requested-With': 'RetroEX',
         ...extra,
       };
       if (ghSessionId) {
@@ -104,7 +123,7 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
 
   const refreshGithubStatusAndRepos = useCallback(
     async (explicitSessionId?: string | null) => {
-      const headers: Record<string, string> = { 'X-Requested-With': 'TellyBeam' };
+      const headers: Record<string, string> = { 'X-Requested-With': 'RetroEX' };
       const sid = explicitSessionId !== undefined ? explicitSessionId : ghSessionId;
       if (sid) headers.Authorization = `Bearer ${sid}`;
 
@@ -125,10 +144,23 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
             if (reposRes.ok && reposData.ok && Array.isArray(reposData.repos)) {
               const list = reposData.repos;
               setGhRepos(list);
-              if (list.length > 0 && !ghOwner && !ghRepo) {
-                setGhOwner(list[0].owner);
-                setGhRepo(list[0].name);
-                setGhBranch(list[0].defaultBranch || 'main');
+              if (statusData.username && !ghOwner) {
+                setGhOwner(statusData.username);
+              }
+              if (list.length > 0) {
+                if (!ghOwner) setGhOwner(statusData.username || list[0].owner);
+                const retroexRepo = list.find((r) => r.name.toLowerCase() === 'retroex');
+                if (retroexRepo) {
+                  setGhRepo(retroexRepo.name);
+                  setGhBranch(retroexRepo.defaultBranch || 'main');
+                } else if (
+                  !ghRepo ||
+                  ['tellybeam-tv-apk', 'snesex-apk', 'snesex', 'tellybeam', 'retro'].includes(
+                    ghRepo.toLowerCase()
+                  )
+                ) {
+                  setGhRepo('RetroEX');
+                }
               }
             } else if (!reposRes.ok) {
               setGhAuthError(reposData.error || `Failed to load repositories (HTTP ${reposRes.status}).`);
@@ -313,10 +345,54 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
     }
   };
 
+  const handleRenameRepoToRetroEX = async () => {
+    const owner = ghOwner.trim();
+    const currentRepo = ghRepo.trim();
+    if (!owner || !currentRepo) {
+      setCompileError('Specify GitHub owner and current repository first.');
+      return;
+    }
+    setRenamingRepo(true);
+    setCompileError(null);
+    setRenameSuccessMsg(null);
+    try {
+      const res = await fetch(apiUrl('/api/github/rename-repo'), {
+        method: 'POST',
+        headers: buildGithubAuthHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({
+          owner,
+          currentRepo,
+          newRepo: 'RetroEX',
+        }),
+      });
+      const data = await readJsonSafe<{
+        ok: boolean;
+        error?: string;
+        message?: string;
+        newName?: string;
+      }>(res, 'Rename repository on GitHub');
+
+      if (!res.ok || !data.ok) {
+        setCompileError(data.error || 'Failed to rename repository on GitHub.');
+        return;
+      }
+
+      const updatedName = data.newName || 'RetroEX';
+      setGhRepo(updatedName);
+      saveRepoToStorage(owner, updatedName);
+      setRenameSuccessMsg(data.message || `Successfully renamed to ${updatedName} on GitHub!`);
+      void refreshGithubStatusAndRepos();
+    } catch (err) {
+      setCompileError(err instanceof Error ? err.message : 'Unable to rename repository on GitHub.');
+    } finally {
+      setRenamingRepo(false);
+    }
+  };
+
   const handleCompileOnGithub = async (e: React.FormEvent) => {
     e.preventDefault();
     const owner = ghOwner.trim();
-    const repo = ghRepo.trim();
+    const repo = ghRepo.trim() || 'RetroEX';
     if (!owner || !repo) {
       setCompileError('Select or enter a GitHub owner and repository.');
       return;
@@ -325,6 +401,7 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
     setCompiling(true);
     setCompileError(null);
     setCompileMessage(null);
+    setRenameSuccessMsg(null);
 
     try {
       const res = await fetch(apiUrl('/api/github/setup-and-compile'), {
@@ -335,8 +412,8 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
           repo,
           branch: ghBranch.trim() || 'main',
           releaseTag: compileTag.trim() || 'v1.0.0',
-          appName: compileAppName.trim() || 'TellyBeam TV',
-          appId: compileAppId.trim() || 'app.tellybeam.tv',
+          appName: compileAppName.trim() || 'RetroEX',
+          appId: compileAppId.trim() || 'app.retroex.tv',
           syncWorkflow: true,
           syncSource,
           serverUrl: '',
@@ -495,7 +572,7 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
                     type="text"
                     value={newRepoName}
                     onChange={(e) => setNewRepoName(e.target.value)}
-                    placeholder="tellybeam-tv-apk"
+                    placeholder="RetroEX"
                     aria-label="New GitHub repository name"
                     className="flex-1 h-9 px-3 text-xs font-mono bg-white border border-slate-200 rounded-md text-slate-900"
                   />
@@ -524,6 +601,12 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
           )}
 
           <form onSubmit={handleCompileOnGithub} className="grid grid-cols-1 sm:grid-cols-12 gap-3.5">
+            {renameSuccessMsg && (
+              <div className="sm:col-span-12 p-3 bg-emerald-50 border border-emerald-200 rounded-md text-emerald-800 text-xs flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>{renameSuccessMsg}</span>
+              </div>
+            )}
             <div className="sm:col-span-4">
               <label htmlFor="apk-owner" className="block text-xs font-medium text-slate-600 mb-1">
                 GitHub Owner
@@ -533,20 +616,34 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
                 type="text"
                 value={ghOwner}
                 onChange={(e) => setGhOwner(e.target.value)}
-                placeholder="ff6locke"
+                placeholder={ghStatus?.username || 'github-username'}
                 className="w-full h-9 px-3 text-xs font-mono bg-white border border-slate-200 rounded-md text-slate-900"
               />
             </div>
             <div className="sm:col-span-5">
-              <label htmlFor="apk-repo" className="block text-xs font-medium text-slate-600 mb-1">
-                Repository
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label htmlFor="apk-repo" className="block text-xs font-medium text-slate-600">
+                  Repository
+                </label>
+                {ghRepo.trim() &&
+                  ghRepo.trim().toLowerCase() !== 'retroex' &&
+                  ghOwner.trim() && (
+                    <button
+                      type="button"
+                      disabled={renamingRepo}
+                      onClick={() => void handleRenameRepoToRetroEX()}
+                      className="text-[11px] font-medium text-blue-600 hover:text-blue-800 underline disabled:opacity-50"
+                    >
+                      {renamingRepo ? 'Renaming on GitHub...' : 'Rename to RetroEX on GitHub'}
+                    </button>
+                  )}
+              </div>
               <input
                 id="apk-repo"
                 type="text"
                 value={ghRepo}
                 onChange={(e) => setGhRepo(e.target.value)}
-                placeholder="tellybeam-tv-apk"
+                placeholder="RetroEX"
                 className="w-full h-9 px-3 text-xs font-mono bg-white border border-slate-200 rounded-md text-slate-900"
               />
             </div>
@@ -586,7 +683,7 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
                 type="text"
                 value={compileAppName}
                 onChange={(e) => setCompileAppName(e.target.value)}
-                placeholder="TellyBeam TV"
+                placeholder="RetroEX"
                 className="w-full h-9 px-3 text-xs bg-white border border-slate-200 rounded-md text-slate-900"
               />
             </div>
@@ -599,7 +696,7 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
                 type="text"
                 value={compileAppId}
                 onChange={(e) => setCompileAppId(e.target.value)}
-                placeholder="app.tellybeam.tv"
+                placeholder="app.retroex.tv"
                 className="w-full h-9 px-3 text-xs font-mono bg-white border border-slate-200 rounded-md text-slate-900"
               />
             </div>
