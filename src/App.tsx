@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Gamepad2, Hammer, Tv } from 'lucide-react';
+import { Hammer, Tv } from 'lucide-react';
 import { BuildApkModal } from './components/BuildApkModal';
 import { PhoneGamepadView } from './components/PhoneGamepadView';
 import { SnesEmulatorPanel } from './components/SnesEmulatorPanel';
@@ -44,7 +44,14 @@ export default function App() {
   );
   const [showBuildModal, setShowBuildModal] = useState(false);
   const [activeTab, setActiveTab] = useState<'emulator' | 'transfer'>('emulator');
+  const [pendingRom, setPendingRom] = useState<{ id: string; name: string; blob: Blob } | null>(null);
   const isNativeApk = isNativeCapacitorOrigin();
+
+  const handlePlayTransferredRom = (rom: { name: string; blob: Blob }) => {
+    setPendingRom({ id: `${Date.now()}_${rom.name}`, name: rom.name, blob: rom.blob });
+    setTvReceiverMode(false);
+    setActiveTab('emulator');
+  };
 
   const openTvReceiver = (code?: string) => {
     const targetCode = code ?? tvRoomCode;
@@ -73,6 +80,7 @@ export default function App() {
     return (
       <TvReceiverView
         initialCode={tvRoomCode}
+        onPlayRom={handlePlayTransferredRom}
         onExitTvMode={(activeCode) => {
           setTvReceiverMode(false);
           if (activeCode) {
@@ -168,11 +176,12 @@ export default function App() {
 
       <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
         {activeTab === 'emulator' ? (
-          <SnesEmulatorPanel roomCode={tvRoomCode || '123456'} />
+          <SnesEmulatorPanel roomCode={tvRoomCode || '123456'} externalRom={pendingRom} />
         ) : (
           <TvTransferPanel
             initialRoomCode={tvRoomCode}
             onOpenTvReceiver={(code) => openTvReceiver(code)}
+            onPlayRom={handlePlayTransferredRom}
           />
         )}
       </main>

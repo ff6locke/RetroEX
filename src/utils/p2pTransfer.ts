@@ -822,30 +822,218 @@ export class P2pTransferSession {
   }
 }
 
-export async function saveOrShareReceivedFile(file: P2pIncomingFile): Promise<void> {
-  // Prefer native share sheet on Android when available so APK users can Save/Install directly
-  if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+export interface SaveFileResult {
+  ok: boolean;
+  method: 'android-bridge' | 'file-picker' | 'http-relay' | 'download';
+  message: string;
+}
+
+interface RetroExAndroidBridge {
+  beginSaveFile?: (filename: string, mimeType: string) => string;
+  appendSaveFile?: (transferId: string, base64Chunk: string) => boolean;
+  finishSaveFile?: (transferId: string) => string;
+}
+
+function getRetroExAndroidBridge(): RetroExAndroidBridge | null {
+  if (typeof window === 'undefined') return null;
+  const win = window as Window & { RetroExAndroid?: RetroExAndroidBridge };
+  if (
+    win.RetroExAndroid &&
+    typeof win.RetroExAndroid.beginSaveFile === 'function' &&
+    typeof win.RetroExAndroid.appendSaveFile === 'function' &&
+    typeof win.RetroExAndroid.finishSaveFile === 'function'
+  ) {
+    return win.RetroExAndroid;
+  }
+  return null;
+}
+
+function uint8ToBase64(bytes: Uint8Array): string {
+  const CHUNK = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    const sub = bytes.subarray(i, i + CHUNK);
+    binary += String.fromCharCode.apply(null, Array.from(sub));
+  }
+  return btoa(binary);
+}
+
+function triggerAnchorDownload(url: string, filename: string): void {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.rel = 'noopener';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  window.setTimeout(() => {
     try {
-      const fileObj = new File([file.blob], file.name, {
-        type: file.mimeType || 'application/octet-stream',
+      document.body.removeChild(a);
+    } catch {
+      // already detached
+    }
+  }, 2000);
+}
+
+export async function shareReceivedFile(file: P2pIncomingFile): Promise<boolean> {
+  if (typeof navigator === 'undefined' || typeof navigator.share !== 'function') {
+    return false;
+  }
+  try {
+    const fileObj = new File([file.blob], file.name, {
+      type: file.mimeType || 'application/octet-stream',
+    });
+    if (typeof navigator.canShare === 'function' && navigator.canShare({ files: [fileObj] })) {
+      await navigator.share({
+        files: [fileObj],
+        title: file.name,
       });
-      if (typeof navigator.canShare === 'function' && navigator.canShare({ files: [fileObj] })) {
-        await navigator.share({
-          files: [fileObj],
-          title: file.name,
-        });
-        return;
+      return true;
+    }
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') return true;
+  }
+  return false;
+}
+
+export async function saveOrShareReceivedFile(file: P2pIncomingFile): Promise<SaveFileResult> {
+  // 1. Native RetroEX Android APK bridge -> writes directly to public Downloads/RetroEX/
+  const androidBridge = getRetroExAndroidBridge();
+  if (androidBridge?.beginSaveFile && androidBridge.appendSaveFile && androidBridge.finishSaveFile) {
+    try {
+      const transferId = androidBridge.beginSaveFile(
+        file.name,
+        file.mimeType || 'application/octet-stream'
+      );
+      if (transferId) {
+        const CHUNK_BYTES = 512 * 1024;
+        for (let offset = 0; offset < file.blob.size; offset += CHUNK_BYTES) {
+          const slice = file.blob.slice(offset, offset + CHUNK_BYTES);
+          const buf = new Uint8Array(await slice.arrayBuffer());
+          const ok = androidBridge.appendSaveFile(transferId, uint8ToBase64(buf));
+          if (!ok) throw new Error('Android storage write interrupted');
+        }
+        const finishRaw = androidBridge.finishSaveFile(transferId);
+        try {
+          const parsed = JSON.parse(finishRaw) as { ok?: boolean; path?: string; error?: string };
+          if (parsed.ok) {
+            return {
+              ok: true,
+              method: 'android-bridge',
+              message: `Saved to ${parsed.path || `Downloads/RetroEX/${file.name}`}`,
+            };
+          }
+          if (parsed.error) throw new Error(parsed.error);
+        } catch (jsonErr) {
+          if (jsonErr instanceof SyntaxError) {
+            return {
+              ok: true,
+              method: 'android-bridge',
+              message: `Saved ${file.name} to Downloads/RetroEX`,
+            };
+          }
+          throw jsonErr;
+        }
       }
     } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') return;
-      // Fall through to standard anchor download
+      return {
+        ok: false,
+        method: 'android-bridge',
+        message: err instanceof Error ? err.message : 'Unable to save to Android Downloads.',
+      };
     }
   }
 
-  const a = document.createElement('a');
-  a.href = file.blobUrl;
-  a.download = file.name;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
+  // 2. Desktop top-level File System Access API (must run synchronously on click before any await)
+  const isAndroid = typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent || '');
+  const winWithPicker = window as Window & {
+    showSaveFilePicker?: (opts?: { suggestedName?: string }) => Promise<{
+      createWritable: () => Promise<{
+        write: (data: Blob) => Promise<void>;
+        close: () => Promise<void>;
+      }>;
+    }>;
+  };
+  if (
+    !isAndroid &&
+    typeof window !== 'undefined' &&
+    window.self === window.top &&
+    typeof winWithPicker.showSaveFilePicker === 'function'
+  ) {
+    try {
+      const handle = await winWithPicker.showSaveFilePicker({ suggestedName: file.name });
+      const writable = await handle.createWritable();
+      await writable.write(file.blob);
+      await writable.close();
+      return {
+        ok: true,
+        method: 'file-picker',
+        message: `Saved ${file.name}`,
+      };
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        return { ok: false, method: 'file-picker', message: 'Save cancelled.' };
+      }
+      // Fall through to HTTP/blob download
+    }
+  }
+
+  // 3. On Android browsers/WebViews, DownloadManager rejects blob: URLs; use HTTPS relay when available
+  if (isAndroid && file.size <= 250 * 1024 * 1024) {
+    try {
+      const { apiUrl, hasReachableBackendConfig } = await import('./apiUrl');
+      if (hasReachableBackendConfig()) {
+        const form = new FormData();
+        form.append('filename', file.name);
+        form.append('file', file.blob, file.name);
+        const res = await fetch(apiUrl('/api/tv/relay-download'), {
+          method: 'POST',
+          body: form,
+        });
+        const data = (await res.json()) as { ok?: boolean; downloadUrl?: string };
+        if (res.ok && data.ok && data.downloadUrl) {
+          const fullUrl = apiUrl(data.downloadUrl);
+          // Hidden iframe with Content-Disposition: attachment triggers Android DownloadManager cleanly without user-gesture loss
+          const dlFrame = document.createElement('iframe');
+          dlFrame.style.display = 'none';
+          dlFrame.src = fullUrl;
+          document.body.appendChild(dlFrame);
+          window.setTimeout(() => {
+            try {
+              document.body.removeChild(dlFrame);
+            } catch {
+              // ignore
+            }
+          }, 15000);
+          return {
+            ok: true,
+            method: 'http-relay',
+            message: `Downloading ${file.name} to Downloads...`,
+          };
+        }
+      }
+    } catch {
+      // Fall through to blob anchor download
+    }
+  }
+
+  // 4. Standard browser blob download (delayed anchor cleanup so WebKit/Blink doesn't abort)
+  try {
+    const freshUrl = file.blob ? URL.createObjectURL(file.blob) : file.blobUrl;
+    triggerAnchorDownload(freshUrl, file.name);
+    if (freshUrl !== file.blobUrl) {
+      window.setTimeout(() => URL.revokeObjectURL(freshUrl), 60000);
+    }
+    return {
+      ok: true,
+      method: 'download',
+      message: `Download started: ${file.name}`,
+    };
+  } catch {
+    return {
+      ok: false,
+      method: 'download',
+      message: 'Browser blocked automatic download. Try Play ROM or Share.',
+    };
+  }
 }

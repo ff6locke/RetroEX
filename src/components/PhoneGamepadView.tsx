@@ -1,5 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Gamepad2, Maximize2, Wifi } from 'lucide-react';
+import {
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
+  Gamepad2,
+  Maximize2,
+  SlidersHorizontal,
+  Wifi,
+} from 'lucide-react';
 
 interface PhoneGamepadViewProps {
   roomCode: string;
@@ -133,6 +142,30 @@ export function PhoneGamepadView({ roomCode, onExit }: PhoneGamepadViewProps) {
     }
   };
 
+  const sendCommand = (command: 'MENU_TOGGLE') => {
+    if (typeof navigator !== 'undefined' && navigator.vibrate) {
+      try {
+        navigator.vibrate(25);
+      } catch {
+        // ignore
+      }
+    }
+
+    const payload = JSON.stringify({ type: 'snes-command', command });
+
+    if (broadcastRef.current) {
+      broadcastRef.current.postMessage(payload);
+    }
+
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      const topic = `retroex/gamepad/${roomCode}`;
+      const topicBytes = encodeMqttString(topic);
+      const payloadBytes = new TextEncoder().encode(payload);
+      ws.send(buildMqttPacket(0x30, [topicBytes, payloadBytes]));
+    }
+  };
+
   const toggleFullscreen = () => {
     if (!document.fullscreenElement) {
       document.documentElement.requestFullscreen().catch(() => {});
@@ -257,8 +290,17 @@ export function PhoneGamepadView({ roomCode, onExit }: PhoneGamepadViewProps) {
           <div className="w-10 h-10 rounded bg-slate-950 border border-slate-800" />
         </div>
 
-        {/* Center Select & Start */}
-        <div className="flex flex-col items-center justify-center gap-6">
+        {/* Center Menu, Select & Start */}
+        <div className="flex flex-col items-center justify-center gap-5">
+          <button
+            type="button"
+            onClick={() => sendCommand('MENU_TOGGLE')}
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full border border-indigo-500/60 bg-indigo-600/90 hover:bg-indigo-500 text-white text-[11px] font-bold tracking-wider uppercase shadow-md active:scale-95 transition-transform"
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5" />
+            Menu
+          </button>
+
           <div className="flex gap-4">
             <button
               type="button"
@@ -346,8 +388,8 @@ export function PhoneGamepadView({ roomCode, onExit }: PhoneGamepadViewProps) {
         </div>
       </div>
 
-      <div className="text-center text-[11px] text-slate-500 pb-1">
-        Connected to RetroEX on TV · Match code #{roomCode}
+      <div className="text-center text-[11px] text-slate-400 pb-1">
+        Connected to RetroEX (#{roomCode}) · Menu: D-Pad moves · A confirms · B goes back
       </div>
     </div>
   );

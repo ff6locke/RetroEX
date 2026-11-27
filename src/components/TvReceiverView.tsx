@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, Download, FileBox, Film, Package, RefreshCw, Tv, Wifi } from 'lucide-react';
+import { ArrowLeft, Download, FileBox, Film, Gamepad2, Loader2, Package, RefreshCw, Tv, Wifi } from 'lucide-react';
 import { QrCodeSvg } from './QrCodeSvg';
 import { getPublicAppOrigin, isAiStudioAuthGatedUrl, isNativeCapacitorOrigin } from '../utils/apiUrl';
 import {
@@ -14,6 +14,7 @@ import {
 interface TvReceiverViewProps {
   initialCode?: string;
   onExitTvMode: (activeCode?: string) => void;
+  onPlayRom?: (rom: { name: string; blob: Blob }) => void;
 }
 
 function formatBytes(bytes: number): string {
@@ -46,21 +47,43 @@ function FileIcon({ name }: { name: string }) {
   return <FileBox className="w-6 h-6 text-slate-300 shrink-0" />;
 }
 
-export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProps) {
+function isSnesRomFile(name: string): boolean {
+  return /\.(smc|sfc|swc|fig|zip)$/i.test(name);
+}
+
+export function TvReceiverView({ initialCode, onExitTvMode, onPlayRom }: TvReceiverViewProps) {
   const [roomCode, setRoomCode] = useState<string>(() =>
     initialCode && /^\d{6}$/.test(initialCode) ? initialCode : generateRoomCode()
   );
   const [joinInput, setJoinInput] = useState(() =>
     initialCode && /^\d{6}$/.test(initialCode) ? initialCode : ''
   );
+  const [joinError, setJoinError] = useState<string | null>(null);
   const [connState, setConnState] = useState<P2pConnectionState>('initializing');
   const [connDetail, setConnDetail] = useState<string>('Starting direct pairing...');
   const [incomingProgress, setIncomingProgress] = useState<P2pIncomingProgress | null>(null);
   const [receivedFiles, setReceivedFiles] = useState<P2pIncomingFile[]>([]);
-  const [joinError, setJoinError] = useState<string | null>(null);
+  const [savingFileId, setSavingFileId] = useState<string | null>(null);
+  const [saveNotice, setSaveNotice] = useState<{ ok: boolean; text: string } | null>(null);
 
   const receivedFilesRef = useRef<P2pIncomingFile[]>([]);
   receivedFilesRef.current = receivedFiles;
+
+  const handleSaveFile = async (file: P2pIncomingFile) => {
+    setSavingFileId(file.id);
+    setSaveNotice(null);
+    try {
+      const res = await saveOrShareReceivedFile(file);
+      setSaveNotice({ ok: res.ok, text: res.message });
+    } catch (err) {
+      setSaveNotice({
+        ok: false,
+        text: err instanceof Error ? err.message : 'Unable to save file.',
+      });
+    } finally {
+      setSavingFileId((curr) => (curr === file.id ? null : curr));
+    }
+  };
 
   useEffect(() => {
     const session = new P2pTransferSession(roomCode, {
@@ -270,6 +293,18 @@ export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProp
             </div>
           )}
 
+          {saveNotice && (
+            <div
+              className={`px-4 py-2.5 rounded-lg border text-sm font-medium ${
+                saveNotice.ok
+                  ? 'bg-emerald-950/60 border-emerald-700 text-emerald-200'
+                  : 'bg-red-950/60 border-red-700 text-red-200'
+              }`}
+            >
+              {saveNotice.text}
+            </div>
+          )}
+
           {receivedFiles.length === 0 ? (
             <div className="py-16 border border-dashed border-slate-700 rounded-lg text-center px-6">
               <p className="text-base font-medium text-slate-200">
@@ -284,6 +319,8 @@ export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProp
             <div className="space-y-3">
               {receivedFiles.map((file) => {
                 const isApk = /\.(apk|xapk|apks)$/i.test(file.name);
+                const canPlayRom = Boolean(onPlayRom && isSnesRomFile(file.name));
+                const isSaving = savingFileId === file.id;
                 return (
                   <div
                     key={file.id}
@@ -307,18 +344,35 @@ export function TvReceiverView({ initialCode, onExitTvMode }: TvReceiverViewProp
                       </div>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => void saveOrShareReceivedFile(file)}
-                      className={`inline-flex items-center justify-center gap-2 px-5 py-3 text-sm font-semibold rounded-lg focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-blue-400 transition-colors whitespace-nowrap shrink-0 ${
-                        isApk
-                          ? 'bg-emerald-600 text-white hover:bg-emerald-500'
-                          : 'bg-blue-600 text-white hover:bg-blue-500'
-                      }`}
-                    >
-                      <Download className="w-4 h-4" />
-                      {isApk ? 'Save / Install APK' : 'Save File'}
-                    </button>
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      {canPlayRom && (
+                        <button
+                          type="button"
+                          onClick={() => onPlayRom?.({ name: file.name, blob: file.blob })}
+                          className="inline-flex items-center justify-center gap-2 px-4 py-3 text-sm font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-500 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-indigo-400 transition-colors whitespace-nowrap shrink-0"
+                        >
+                          <Gamepad2 className="w-4 h-4" />
+                          Play ROM
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        disabled={isSaving}
+                        onClick={() => void handleSaveFile(file)}
+                        className={`inline-flex items-center justify-center gap-2 px-5 py-3 text-sm font-semibold rounded-lg focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-blue-400 transition-colors whitespace-nowrap shrink-0 disabled:opacity-60 ${
+                          isApk
+                            ? 'bg-emerald-600 text-white hover:bg-emerald-500'
+                            : 'bg-blue-600 text-white hover:bg-blue-500'
+                        }`}
+                      >
+                        {isSaving ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Download className="w-4 h-4" />
+                        )}
+                        {isSaving ? 'Saving...' : isApk ? 'Save / Install APK' : 'Save File'}
+                      </button>
+                    </div>
                   </div>
                 );
               })}

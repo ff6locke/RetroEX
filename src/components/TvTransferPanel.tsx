@@ -4,6 +4,8 @@ import {
   Copy,
   Download,
   FileUp,
+  Gamepad2,
+  Loader2,
   RefreshCw,
   Tv,
   Upload,
@@ -28,6 +30,7 @@ import {
 interface TvTransferPanelProps {
   initialRoomCode?: string;
   onOpenTvReceiver: (code?: string) => void;
+  onPlayRom?: (rom: { name: string; blob: Blob }) => void;
 }
 
 function formatBytes(bytes: number): string {
@@ -50,7 +53,11 @@ function classifyTransferFile(name: string): string {
   return 'File';
 }
 
-export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransferPanelProps) {
+function isSnesRomFile(name: string): boolean {
+  return /\.(smc|sfc|swc|fig|zip)$/i.test(name);
+}
+
+export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver, onPlayRom }: TvTransferPanelProps) {
   const [roomCode, setRoomCode] = useState<string>(() =>
     initialRoomCode && /^\d{6}$/.test(initialRoomCode) ? initialRoomCode : generateRoomCode()
   );
@@ -63,6 +70,8 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
   const [outgoingFiles, setOutgoingFiles] = useState<P2pOutgoingProgress[]>([]);
   const [incomingProgress, setIncomingProgress] = useState<P2pIncomingProgress | null>(null);
   const [receivedFiles, setReceivedFiles] = useState<P2pIncomingFile[]>([]);
+  const [savingFileId, setSavingFileId] = useState<string | null>(null);
+  const [saveNotice, setSaveNotice] = useState<{ ok: boolean; text: string } | null>(null);
 
   const sessionRef = useRef<P2pTransferSession | null>(null);
   const receivedFilesRef = useRef<P2pIncomingFile[]>([]);
@@ -71,6 +80,22 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
   const [isDragging, setIsDragging] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleSaveFile = async (file: P2pIncomingFile) => {
+    setSavingFileId(file.id);
+    setSaveNotice(null);
+    try {
+      const res = await saveOrShareReceivedFile(file);
+      setSaveNotice({ ok: res.ok, text: res.message });
+    } catch (err) {
+      setSaveNotice({
+        ok: false,
+        text: err instanceof Error ? err.message : 'Unable to save file.',
+      });
+    } finally {
+      setSavingFileId((curr) => (curr === file.id ? null : curr));
+    }
+  };
 
   useEffect(() => {
     setOutgoingFiles([]);
@@ -343,6 +368,18 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
               </span>
             </div>
 
+            {saveNotice && (
+              <div
+                className={`mt-3 px-3 py-2 rounded-md border text-xs font-medium ${
+                  saveNotice.ok
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                    : 'bg-red-50 border-red-200 text-red-800'
+                }`}
+              >
+                {saveNotice.text}
+              </div>
+            )}
+
             {receivedFiles.length === 0 ? (
               <div className="py-8 text-center text-xs text-slate-500 border-b border-slate-100">
                 No incoming files yet. Send a file from the paired device to save it here.
@@ -359,29 +396,50 @@ export function TvTransferPanel({ initialRoomCode, onOpenTvReceiver }: TvTransfe
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-xs">
-                    {receivedFiles.map((file) => (
-                      <tr key={file.id} className="hover:bg-slate-50/70">
-                        <td className="py-2.5 pr-3">
-                          <div className="font-medium text-slate-900 break-all">{file.name}</div>
-                        </td>
-                        <td className="py-2.5 px-3 text-slate-600 whitespace-nowrap">
-                          {classifyTransferFile(file.name)}
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-700 whitespace-nowrap">
-                          {formatBytes(file.size)}
-                        </td>
-                        <td className="py-2.5 pl-3 text-right whitespace-nowrap">
-                          <button
-                            type="button"
-                            onClick={() => void saveOrShareReceivedFile(file)}
-                            className="inline-flex items-center gap-1 px-2.5 py-1 font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100"
-                          >
-                            <Download className="w-3.5 h-3.5" />
-                            Save
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                    {receivedFiles.map((file) => {
+                      const isSaving = savingFileId === file.id;
+                      const canPlayRom = Boolean(onPlayRom && isSnesRomFile(file.name));
+                      return (
+                        <tr key={file.id} className="hover:bg-slate-50/70">
+                          <td className="py-2.5 pr-3">
+                            <div className="font-medium text-slate-900 break-all">{file.name}</div>
+                          </td>
+                          <td className="py-2.5 px-3 text-slate-600 whitespace-nowrap">
+                            {classifyTransferFile(file.name)}
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-700 whitespace-nowrap">
+                            {formatBytes(file.size)}
+                          </td>
+                          <td className="py-2.5 pl-3 text-right whitespace-nowrap">
+                            <div className="inline-flex items-center gap-1.5">
+                              {canPlayRom && (
+                                <button
+                                  type="button"
+                                  onClick={() => onPlayRom?.({ name: file.name, blob: file.blob })}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 font-medium text-indigo-700 bg-indigo-50 border border-indigo-200 rounded hover:bg-indigo-100"
+                                >
+                                  <Gamepad2 className="w-3.5 h-3.5" />
+                                  Play ROM
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                disabled={isSaving}
+                                onClick={() => void handleSaveFile(file)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100 disabled:opacity-60"
+                              >
+                                {isSaving ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <Download className="w-3.5 h-3.5" />
+                                )}
+                                {isSaving ? 'Saving...' : 'Save'}
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
