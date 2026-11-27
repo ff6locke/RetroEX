@@ -58,6 +58,16 @@ async function readJsonSafe<T = Record<string, unknown>>(
   endpointLabel: string
 ): Promise<T> {
   const text = await res.text();
+  if (
+    text.includes('Starting Server') ||
+    text.includes('Vite') ||
+    text.trim().startsWith('<!DOCTYPE') ||
+    text.trim().startsWith('<html')
+  ) {
+    throw new Error(
+      `${endpointLabel} backend is starting up. Please wait 3 seconds and click Compile APK again.`
+    );
+  }
   try {
     return JSON.parse(text) as T;
   } catch {
@@ -402,48 +412,69 @@ export function BuildApkModal({ open, onClose }: BuildApkModalProps) {
     setCompileMessage(null);
     setRenameSuccessMsg(null);
 
-    try {
-      const res = await fetch(apiUrl('/api/github/setup-and-compile'), {
-        method: 'POST',
-        headers: buildGithubAuthHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({
-          owner,
-          repo,
-          branch: ghBranch.trim() || 'main',
-          releaseTag: compileTag.trim() || 'v1.0.0',
-          appName: compileAppName.trim() || 'RetroEX',
-          appId: compileAppId.trim() || 'app.retroex.tv',
-          syncWorkflow: true,
-          syncSource,
-          serverUrl: '',
-        }),
-      });
-      const data = await readJsonSafe<{
-        ok: boolean;
-        error?: string;
-        message?: string;
-        actionsUrl?: string;
-      }>(res, 'Compile APK on GitHub');
-      if (!res.ok || !data.ok) {
-        if (res.status === 401) {
-          setGhSessionId(null);
-          void refreshGithubStatusAndRepos(null);
+    let attempt = 0;
+    const maxAttempts = 3;
+    while (attempt < maxAttempts) {
+      attempt++;
+      try {
+        const res = await fetch(apiUrl('/api/github/setup-and-compile'), {
+          method: 'POST',
+          headers: buildGithubAuthHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({
+            owner,
+            repo,
+            branch: ghBranch.trim() || 'main',
+            releaseTag: compileTag.trim() || 'v1.0.0',
+            appName: compileAppName.trim() || 'RetroEX',
+            appId: compileAppId.trim() || 'app.retroex.tv',
+            syncWorkflow: true,
+            syncSource,
+            serverUrl: '',
+          }),
+        });
+        const data = await readJsonSafe<{
+          ok: boolean;
+          error?: string;
+          message?: string;
+          actionsUrl?: string;
+        }>(res, 'Compile APK on GitHub');
+        if (!res.ok || !data.ok) {
+          if (res.status === 401) {
+            setGhSessionId(null);
+            void refreshGithubStatusAndRepos(null);
+          }
+          setCompileError(data.error || 'Failed to trigger GitHub Actions APK build.');
+          setCompiling(false);
+          return;
         }
-        setCompileError(data.error || 'Failed to trigger GitHub Actions APK build.');
+        setCompileMessage({
+          text: data.message || 'Started GitHub Actions APK compilation.',
+          actionsUrl: data.actionsUrl || `https://github.com/${owner}/${repo}/actions`,
+        });
+        window.setTimeout(() => {
+          void fetchWorkflowRuns(owner, repo);
+        }, 1500);
+        setCompiling(false);
+        return;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const isStartingUp = msg.includes('starting up') || msg.includes('Starting Server');
+        if (isStartingUp && attempt < maxAttempts) {
+          setCompileError(`Server starting up (attempt ${attempt}/${maxAttempts}). Retrying in 2 seconds...`);
+          await new Promise((r) => window.setTimeout(r, 2000));
+          continue;
+        }
+        if (attempt >= maxAttempts) {
+          setCompileError(msg);
+          setCompiling(false);
+          return;
+        }
+        setCompileError(msg);
+        setCompiling(false);
         return;
       }
-      setCompileMessage({
-        text: data.message || 'Started GitHub Actions APK compilation.',
-        actionsUrl: data.actionsUrl || `https://github.com/${owner}/${repo}/actions`,
-      });
-      window.setTimeout(() => {
-        void fetchWorkflowRuns(owner, repo);
-      }, 1500);
-    } catch (err) {
-      setCompileError(err instanceof Error ? err.message : 'Unable to start GitHub APK build.');
-    } finally {
-      setCompiling(false);
     }
+    setCompiling(false);
   };
 
   return (
